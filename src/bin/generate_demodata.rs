@@ -1231,7 +1231,11 @@ fn emit_row(
     let views: [(&'static str, f64); 3] = if currency == "EUR" {
         [("Local", 1.0), ("Monthly Average", 1.0), ("Budget", 1.0)]
     } else {
-        [("Local", 1.0), ("Monthly Average", avg_rate), ("Budget", budget_rate)]
+        [
+            ("Local", 1.0),
+            ("Monthly Average", avg_rate),
+            ("Budget", budget_rate),
+        ]
     };
 
     for (fx_type, factor) in views {
