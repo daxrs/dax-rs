@@ -1,0 +1,84 @@
+services:
+  # ── S3-compatible object storage for the parquet files (datasets) ──────────
+  # https://alarik.io/docs/installation
+  alarik:
+    image: ghcr.io/achtungsoftware/alarik:latest
+    restart: unless-stopped
+    ports:
+      # Host 9000 -> container 8080 (alarik's fixed listening port) — 8080 is
+      # commonly already taken on the host, so we avoid it here; container-to-
+      # container traffic (dax-rs, create-bucket) still talks to alarik:8080
+      # directly over the compose network regardless of this host mapping.
+      - "9000:8080"
+    environment:
+      - API_BASE_URL=http://localhost:9000
+      - CONSOLE_BASE_URL=http://localhost:8000
+      - ALARIK_REGION=us-east-1
+      - ADMIN_USERNAME=${ALARIK_ADMIN_USERNAME:-alarik}
+      - ADMIN_PASSWORD=${ALARIK_ADMIN_PASSWORD:-alarik}
+      - DEFAULT_ACCESS_KEY=${ALARIK_ACCESS_KEY:-dax-access-key}
+      - DEFAULT_SECRET_KEY=${ALARIK_SECRET_KEY:-dax-secret-key}
+      - JWT=${ALARIK_JWT:-change-me-to-a-long-random-value}
+      - ALLOW_ACCOUNT_CREATION=false
+    volumes:
+      - alarik-storage:/app/Storage
+
+  # Optional web console for browsing the bucket — remove if you don't need it.
+  alarik-console:
+    image: ghcr.io/achtungsoftware/alarik-console:latest
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - NUXT_PUBLIC_API_BASE_URL=http://localhost:9000
+      - NUXT_PUBLIC_CONSOLE_BASE_URL=http://localhost:8000
+      - NUXT_PUBLIC_ALLOW_ACCOUNT_CREATION=false
+    depends_on:
+      - alarik
+
+  # One-shot job: creates the datasets bucket on first startup. Safe to rerun —
+  # `s3 mb` on an existing bucket just fails and is swallowed by `|| true`.
+  create-bucket:
+    image: amazon/aws-cli
+    depends_on:
+      - alarik
+    environment:
+      - AWS_ACCESS_KEY_ID=${ALARIK_ACCESS_KEY:-dax-access-key}
+      - AWS_SECRET_ACCESS_KEY=${ALARIK_SECRET_KEY:-dax-secret-key}
+      - AWS_DEFAULT_REGION=us-east-1
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until aws --endpoint-url http://alarik:8080 s3 ls > /dev/null 2>&1; do
+          echo "waiting for alarik..."; sleep 2
+        done
+        aws --endpoint-url http://alarik:8080 s3 mb s3://dax-datasets || true
+
+  dax-rs:
+    image: ghcr.io/daxrs/dax-rs:latest
+    restart: unless-stopped
+    depends_on:
+      - create-bucket
+    ports:
+      - "3000:3000"
+    environment:
+      # Datasets (parquet files) — S3-compatible storage via alarik.
+      - DAX_DATASETS_TYPE=s3
+      - DAX_DATASETS_BUCKET=dax-datasets
+      - DAX_DATASETS_REGION=us-east-1
+      - DAX_DATASETS_ENDPOINT=http://alarik:8080
+      # Bucket is dedicated to this data, so parquet files sit at its root
+      # rather than under the local-disk "./demodata" default prefix.
+      - DAX_DATASETS_ROOT=/
+      - DAX_DATASETS_ACCESS_KEY_ID=${ALARIK_ACCESS_KEY:-dax-access-key}
+      - DAX_DATASETS_SECRET_ACCESS_KEY=${ALARIK_SECRET_KEY:-dax-secret-key}
+      # Models (TMSL files) — plain local mount, see `volumes:` below. No
+      # positional model arg is given, so dax-rs scans this root for every
+      # *.json file rather than loading a single named model.
+      - DAX_MODELS_ROOT=/models
+      - DEMO_DATA_SEED=42
+    volumes:
+      - ./models:/models
+
+volumes:
+  alarik-storage:
