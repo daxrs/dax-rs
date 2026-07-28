@@ -1,0 +1,14 @@
+target/
+demodata/
+donotupload/
+xmla.log
+
+# hygeine
+.env
+.env.*
+.zed/
+.vscode/
+.idea/
+.claude/
+.DS_Store
+Thumbs.d

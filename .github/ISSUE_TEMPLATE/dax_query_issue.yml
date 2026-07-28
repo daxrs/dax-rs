@@ -1,0 +1,24 @@
+name: DAX Query Issue
+description: A DAX query returns an unexpected result
+title: "[DAX Query]: "
+labels: ["dax-query"]
+body:
+  - type: textarea
+    id: example-query
+    attributes:
+      label: Example DAX Query
+      render: dax
+    validations:
+      required: true
+  - type: textarea
+    id: expected-result
+    attributes:
+      label: Expected Result
+    validations:
+      required: true
+  - type: textarea
+    id: current-result
+    attributes:
+      label: Current Result
+    validations:
+      required: true

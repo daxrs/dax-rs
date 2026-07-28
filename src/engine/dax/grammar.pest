@@ -1,0 +1,89 @@
+WHITESPACE = _{ " " | "\t" | "\n" | "\r" }
+COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* | "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
+
+_sp = _{ WHITESPACE* }
+
+program = { SOI ~ expr ~ EOI }
+
+query              = { SOI ~ _sp ~ define_block? ~ _sp ~ evaluate_statement+ ~ EOI }
+
+define_block       = { ^"define" ~ _sp ~ definition+ }
+definition         = { measure_definition | var_definition }
+var_definition     = { ^"var"     ~ _sp ~ identifier ~ _sp ~ "=" ~ _sp ~ expr ~ _sp }
+measure_definition = { ^"measure" ~ _sp ~ identifier ~ _sp ~ "[" ~ _sp ~ identifier ~ _sp ~ "]" ~ _sp ~ "=" ~ _sp ~ expr ~ _sp }
+evaluate_statement = { ^"evaluate" ~ _sp ~ expr ~ (_sp ~ order_by_clause ~ (_sp ~ start_at_clause)?)? }
+order_by_clause    = { ^"order" ~ _sp ~ ^"by" ~ _sp ~ order_item ~ (_sp ~ "," ~ _sp ~ order_item)* }
+order_item         = { expr ~ (_sp ~ sort_dir)? }
+sort_dir           = @{ (^"asc" | ^"desc") ~ !(ASCII_ALPHANUMERIC | "_") }
+start_at_clause    = { ^"start" ~ _sp ~ ^"at" ~ _sp ~ start_at_value ~ (_sp ~ "," ~ _sp ~ start_at_value)* }
+start_at_value     = { literal }
+
+expr        = { logical_or }
+logical_or  = { logical_and  ~ (or_op  ~ logical_and)* }
+logical_and = { comparison   ~ (and_op ~ comparison)* }
+or_op       = { "||" }
+and_op      = { "&&" }
+
+comparison    = { concatenation ~ ((not_in_op | in_op | cmp_op) ~ concatenation)? }
+cmp_op        = { "<>" | ">=" | "<=" | ">" | "<" | "=" }
+in_op         = { ^"IN" ~ !(ASCII_ALPHANUMERIC | "_") }
+not_in_op     = { ^"NOT" ~ _sp ~ ^"IN" ~ !(ASCII_ALPHANUMERIC | "_") }
+
+concatenation = { additive ~ (concat_op ~ additive)* }
+concat_op     = { "&" }
+
+additive = { multiplicative ~ (add_op ~ multiplicative)* }
+
+multiplicative = { unary ~ (mul_op ~ unary)* }
+
+unary = { (unary_op ~ unary) | primary }
+unary_op = { "-" | not_kw }
+not_kw = @{ ^"NOT" ~ !(ASCII_ALPHANUMERIC | "_") }
+
+add_op = { "+" | "-" }
+mul_op = { "*" | "/" }
+
+quoted_name = @{ "'" ~ (!"'" ~ ANY)* ~ "'" }
+dax_name    = @{ (!"]" ~ ANY)+ }
+measure_ref = { "[" ~ dax_name ~ "]" }
+
+primary = {
+      var_expr
+    | function_call
+    | column_ref
+    | quoted_name
+    | table_constructor
+    | measure_ref
+    | identifier
+    | literal
+    | "(" ~ expr ~ ")"
+}
+
+table_constructor = { "{" ~ _sp ~ table_ctor_row ~ (_sp ~ "," ~ _sp ~ table_ctor_row)* ~ _sp ~ "}" }
+table_ctor_row    = { "(" ~ _sp ~ expr ~ (_sp ~ "," ~ _sp ~ expr)* ~ _sp ~ ")" | expr }
+
+var_expr = {
+    var_binding+ ~ _sp ~ ^"return" ~ _sp ~ expr
+}
+
+var_binding = {
+    ^"var" ~ _sp ~ identifier ~ _sp ~ "=" ~ _sp ~ expr ~ _sp
+}
+
+function_call = {
+    identifier ~ "(" ~ _sp ~ expr_list? ~ _sp ~ ")"
+}
+
+expr_list = {
+    expr ~ ("," ~ expr)*
+}
+
+column_ref = { (quoted_name | identifier) ~ "[" ~ dax_name ~ "]" }
+
+literal = { number | string }
+
+number = @{ "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
+
+string = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+
+identifier = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }

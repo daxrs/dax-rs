@@ -1,0 +1,147 @@
+// Whitespace and block comments are silently consumed between all tokens.
+WHITESPACE = _{ " " | "\t" | "\n" | "\r" }
+COMMENT    = _{ "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
+
+// ── top level ─────────────────────────────────────────────────────────────────
+
+mdx_query   = { SOI ~ select_stmt ~ EOI }
+select_stmt = { kw_select ~ (cube_select | system_select) }
+
+// ── $system (schema) query ────────────────────────────────────────────────────
+// Distinguishable from cube_select because the column list starts with `[`.
+
+system_select = { col_list ~ kw_from ~ system_from ~ (kw_where ~ cond_list)? }
+
+// Atomic so no whitespace is admitted between "$system." and the table name.
+system_from = @{ ^"$system." ~ plain_ident }
+
+col_list = { bracketed_ident ~ ("," ~ bracketed_ident)* }
+
+cond_list = { condition ~ (kw_and ~ condition)* }
+
+// Named alternatives so the parser can match on rule type.
+condition = { cond_ne | cond_eq | cond_bool }
+cond_eq   = { bracketed_ident ~ "=" ~ cond_value }
+cond_ne   = { bracketed_ident ~ "<>" ~ cond_value }
+cond_bool = { bracketed_ident }
+
+cond_value      = { param_ref | string_literal | integer_literal }
+param_ref       = { "@" ~ plain_ident }
+string_literal  = @{ "'" ~ (!"'" ~ ANY)* ~ "'" }
+integer_literal = @{ ASCII_DIGIT+ }
+
+// ── cube query ────────────────────────────────────────────────────────────────
+// Distinguishable from system_select because the first token after SELECT is
+// NON, { (brace), or a function name — never `[`.
+
+cube_select = {
+    (axis_clause ~ ("," ~ axis_clause)*)?
+    ~ kw_from ~ cube_from
+    ~ (kw_where ~ slicer)?
+    ~ (kw_cell ~ kw_properties ~ prop_list)?
+}
+
+cube_from   = { bracketed_ident | subquery }
+subquery    = { "(" ~ kw_select ~ subq_axis ~ ("," ~ subq_axis)* ~ kw_from ~ bracketed_ident ~ ")" }
+subq_axis   = { set_expr ~ (kw_dimension ~ kw_properties ~ prop_list)? ~ kw_on ~ axis_id }
+
+axis_clause = {
+    kw_non_empty?
+    ~ set_expr
+    ~ (kw_dimension ~ kw_properties ~ prop_list)?
+    ~ kw_on ~ axis_id
+}
+
+axis_id = { kw_columns | kw_rows | integer_literal }
+
+// ── set expressions ───────────────────────────────────────────────────────────
+
+// A bare member expression is also a valid one-element set in MDX.
+set_expr = { func_hierarchize | func_add_calc | func_drilldown_member | func_drilldown_level | func_crossjoin | func_generate | func_ascendants | paren_set | set_literal | member_expr | named_set_ref }
+
+// A parenthesised set expression: ({...}) used e.g. in subquery axes.
+paren_set = { "(" ~ set_expr ~ ")" }
+
+// Functions are case-insensitive to match real-world PowerBI queries.
+func_hierarchize    = { ^"Hierarchize"            ~ "(" ~ set_expr ~ ")" }
+func_add_calc       = { ^"AddCalculatedMembers"   ~ "(" ~ set_expr ~ ")" }
+// DrilldownLevel(Set [, Level [, Index [, INCLUDE_CALC_MEMBERS]]]) — extra args ignored.
+func_drilldown_level = { ^"DrilldownLevel" ~ "(" ~ set_expr ~ drilldown_extra* ~ ")" }
+drilldown_extra      = _{ "," ~ drilldown_arg? }
+drilldown_arg        = { plain_ident | member_expr | integer_literal }
+// CrossJoin(Set, Set)
+func_crossjoin  = { ^"CrossJoin"   ~ "(" ~ set_expr ~ "," ~ set_expr ~ ")" }
+// Generate(Set, Set) — for each member in the first set, evaluates the second set and unions.
+func_generate   = { ^"Generate"    ~ "(" ~ set_expr ~ "," ~ set_expr ~ ")" }
+// Ascendants(Member) — returns the member and all ancestors.
+func_ascendants = { ^"Ascendants"  ~ "(" ~ member_expr ~ ")" }
+// Bare identifier referencing a named set defined in a WITH Set clause.
+named_set_ref   = { plain_ident }
+// DrilldownMember(Set, Set [, Hierarchy [, RECURSIVE]]) — extra args ignored.
+func_drilldown_member = { ^"DrilldownMember" ~ "(" ~ set_expr ~ "," ~ set_expr ~ ("," ~ drilldown_member_arg)* ~ ")" }
+drilldown_member_arg  = { member_expr | plain_ident }
+
+// Braced set: items are either nested set expressions or member expressions.
+// A set_item may also be a parenthesised single-member tuple: ([T].[H].[L]).
+set_literal    = { "{" ~ set_items ~ "}" }
+set_items      = { set_item ~ ("," ~ set_item)* }
+set_item       = { set_expr | set_item_tuple | member_expr }
+set_item_tuple = { "(" ~ member_expr ~ ")" }
+
+// ── member references ─────────────────────────────────────────────────────────
+
+// A member expression is a member reference with an optional traversal suffix.
+// e.g. [vtest_product].[Color].[Color].AllMembers
+//      [vtest_product].[ProductType].&[Widget]
+member_expr = { member_ref ~ ("." ~ traversal)? }
+traversal   = { kw_all_members | kw_members | kw_children | kw_current_member }
+
+// Multi-part bracketed path; the last segment may be a key reference (&[key]).
+member_ref      = { bracketed_ident ~ ("." ~ member_ref_tail)* }
+member_ref_tail = { key_ref | bracketed_ident | member_unbracketed_name }
+key_ref         = { "&" ~ bracketed_ident }
+// Unbracketed member name (e.g. cChildren in [Measures].cChildren).
+// Explicitly excludes traversal keywords so CurrentMember etc. are not consumed here.
+member_unbracketed_name = @{
+    !(^"AllMembers"    ~ !ASCII_ALPHANUMERIC)
+    ~ !(^"Members"     ~ !ASCII_ALPHANUMERIC)
+    ~ !(^"Children"    ~ !ASCII_ALPHANUMERIC)
+    ~ !(^"CurrentMember" ~ !ASCII_ALPHANUMERIC)
+    ~ (ASCII_ALPHANUMERIC | "_")+
+}
+
+// ── slicer ────────────────────────────────────────────────────────────────────
+
+// WHERE ( tuple ) or a bare member reference.
+slicer = { "(" ~ member_expr ~ ("," ~ member_expr)* ~ ")" | member_expr }
+
+// ── property lists ────────────────────────────────────────────────────────────
+
+prop_list = { prop_name ~ ("," ~ prop_name)* }
+prop_name = @{ (ASCII_ALPHANUMERIC | "_")+ }
+
+// ── shared terminals ──────────────────────────────────────────────────────────
+
+plain_ident     = @{ (ASCII_ALPHANUMERIC | "_")+ }
+// Content is anything that is not `]`; allows spaces, parens, dots inside brackets.
+bracketed_ident = @{ "[" ~ (!"]" ~ ANY)+ ~ "]" }
+
+// ── keywords (silent — do not appear in the parse tree) ──────────────────────
+
+kw_select     = _{ ^"SELECT" }
+kw_from       = _{ ^"FROM" }
+kw_where      = _{ ^"WHERE" }
+kw_and        = _{ ^"AND" }
+kw_on         = _{ ^"ON" }
+kw_cell       = _{ ^"CELL" }
+kw_properties = _{ ^"PROPERTIES" }
+kw_dimension  = _{ ^"DIMENSION" }
+
+// Non-silent: appear in the parse tree for axis_id and traversal dispatch.
+kw_non_empty   = ${ ^"NON" ~ WHITESPACE+ ~ ^"EMPTY" }
+kw_columns     = { ^"COLUMNS" }
+kw_rows        = { ^"ROWS" }
+kw_all_members    = { ^"AllMembers" }
+kw_members        = { ^"Members" }
+kw_children       = { ^"Children" }
+kw_current_member = { ^"CurrentMember" }

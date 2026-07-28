@@ -1,0 +1,54 @@
+name: Other Bug
+description: Something other than a DAX query result is broken
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+    validations:
+      required: true
+  - type: textarea
+    id: repro-steps
+    attributes:
+      label: Steps to Reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: dax-rs Version / Commit
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      options:
+        - Docker / docker-compose
+        - Local (cargo run)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: storage-backend
+    attributes:
+      label: Storage Backend (local disk / S3 / Azure Blob / GCS)
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs
+      render: shell

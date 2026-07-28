@@ -1,0 +1,69 @@
+[package]
+name = "dax-rs"
+version = "0.2.3"
+edition = "2021"
+authors = ["lkristensen"]
+license = "AGPL-3.0-or-later"
+description = "A Rust DAX engine and XMLA/SOAP server, compatible with Power BI and Analysis Services live connections, backed by Polars and TMSL models."
+repository = "https://github.com/daxrs/dax-rs"
+
+[lints.clippy]
+unwrap_used = "deny"
+
+[[bin]]
+name = "dax-rs"
+path = "src/main.rs"
+
+[[bin]]
+name = "generate-demodata"
+path = "src/bin/generate_demodata.rs"
+
+[[bench]]
+name = "matrix_query_currency"
+harness = false
+
+[[bench]]
+name = "matrix_query_quantity"
+harness = false
+
+[[bench]]
+name = "sumx_currency_conversion"
+harness = false
+
+[features]
+# More fast paths in polars, slower compile times. No nightly compiler required.
+performant = ["polars/performant"]
+# SIMD + specialization in polars. Requires building the whole crate graph with
+# a nightly rustc — independent of `performant`; combine explicitly if wanted.
+nightly = ["polars/nightly"]
+
+[dependencies]
+chrono = "0.4"
+chrono-tz = "0.10"
+once_cell = "1.21.4"
+pest = "2.8.6"
+pest_derive = "2.8.6"
+polars = { version = "0.54", features = ["lazy", "parquet", "csv", "is_in", "semi_anti_join", "cross_join", "strings"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.149"
+serde_yaml_ng = "0.10"
+quick-xml = { version = "0.41", features = ["serialize"] }
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+hyper = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4", "v5"] }
+rand = "0.10"
+http-body-util = "0.1"
+tower-http = { version = "0.7", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+rust-lzxpress = "0.7.1"
+ms-binxml = "0.1"
+tower = "0.5.3"
+futures = "0.3.32"
+opendal = { version = "0.57", features = ["services-fs", "services-s3", "services-azblob", "services-gcs", "blocking"] }
+rustc-hash = "2.1"
+
+[dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
