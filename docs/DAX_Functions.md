@@ -101,7 +101,7 @@ Each function is marked **Compliant** (matches DAX behaviour for all documented 
 | `INTERSECT(table1, table2)`                                | Compliant |       |
 | `UNION(table1, table2, ...)`                               | Compliant |       |
 | `NATURALLEFTOUTERJOIN(left, right)`                        | Compliant |       |
-| `NATURALINNERJOIN(left, right)`                            | Pending   | Same as `NATURALLEFTOUTERJOIN` but drops left rows with no right match. Trivial extension once the left-join path exists — swap `JoinType::Left` for `JoinType::Inner`. |
+| `NATURALINNERJOIN(left, right)`                            | Compliant |       |
 | `SUBSTITUTEWITHINDEX(table, name, indexTable, col, order)` | Compliant | |
 
 ---
