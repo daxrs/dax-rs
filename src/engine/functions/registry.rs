@@ -188,6 +188,11 @@ impl FunctionRegistry {
             Table,
         );
         reg.register(
+            "NATURALINNERJOIN",
+            crate::engine::functions::aggregation::natural_inner_join_fn,
+            Table,
+        );
+        reg.register(
             "HASONEVALUE",
             crate::engine::functions::aggregation::hasonevalue,
             Boolean,
@@ -1204,6 +1209,15 @@ impl FunctionRegistry {
             "NATURALLEFTOUTERJOIN",
             "TABLE",
             "Left outer joins two tables on their common columns.",
+            [
+                p!("leftTable", "The left table."),
+                p!("rightTable", "The right table.")
+            ]
+        );
+        m!(
+            "NATURALINNERJOIN",
+            "TABLE",
+            "Inner joins two tables on their common columns, keeping only rows with a match in both.",
             [
                 p!("leftTable", "The left table."),
                 p!("rightTable", "The right table.")
