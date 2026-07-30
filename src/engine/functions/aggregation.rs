@@ -657,37 +657,59 @@ pub fn row_fn(
     Ok(Value::Table(String::new(), df))
 }
 
-pub fn natural_left_outer_join_fn(
-    args: Vec<Value>,
-    _ctx: &ExecutionContext,
-    _fc: &FilterContext,
-    _rc: &RowContext,
-) -> DaxResult<Value> {
+#[derive(Clone, Copy)]
+enum NaturalJoinKind {
+    NaturalLeftOuterJoin,
+    NaturalInnerJoin,
+}
+
+impl From<NaturalJoinKind> for JoinType {
+    fn from(kind: NaturalJoinKind) -> Self {
+        match kind {
+            NaturalJoinKind::NaturalLeftOuterJoin => JoinType::Left,
+            NaturalJoinKind::NaturalInnerJoin => JoinType::Inner,
+        }
+    }
+}
+
+impl std::fmt::Display for NaturalJoinKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            NaturalJoinKind::NaturalLeftOuterJoin => "NATURALLEFTOUTERJOIN",
+            NaturalJoinKind::NaturalInnerJoin => "NATURALINNERJOIN",
+        };
+        write!(f, "{name}")
+    }
+}
+
+fn natural_join(args: Vec<Value>, kind: NaturalJoinKind) -> DaxResult<Value> {
+    let join_type: JoinType = kind.into();
+
     let mut it = args.into_iter();
     let (left_name, left_df) = match it.next() {
         Some(Value::Table(name, df)) => (name, df),
         Some(other) => {
             return Err(DaxError::Type(format!(
-                "NATURALLEFTOUTERJOIN: first argument must be a table, got {other:?}"
+                "{kind}: first argument must be a table, got {other:?}"
             )))
         }
         None => {
-            return Err(DaxError::InvalidArgument(
-                "NATURALLEFTOUTERJOIN: missing first argument".into(),
-            ))
+            return Err(DaxError::InvalidArgument(format!(
+                "{kind}: missing first argument"
+            )))
         }
     };
     let right_df = match it.next() {
         Some(Value::Table(_, df)) => df,
         Some(other) => {
             return Err(DaxError::Type(format!(
-                "NATURALLEFTOUTERJOIN: second argument must be a table, got {other:?}"
+                "{kind}: second argument must be a table, got {other:?}"
             )))
         }
         None => {
-            return Err(DaxError::InvalidArgument(
-                "NATURALLEFTOUTERJOIN: missing second argument".into(),
-            ))
+            return Err(DaxError::InvalidArgument(format!(
+                "{kind}: missing second argument"
+            )))
         }
     };
 
@@ -723,16 +745,34 @@ pub fn natural_left_outer_join_fn(
     }
 
     if left_keys.is_empty() {
-        return Err(DaxError::InvalidArgument(
-            "NATURALLEFTOUTERJOIN: left and right tables share no column names".into(),
-        ));
+        return Err(DaxError::InvalidArgument(format!(
+            "{kind}: left and right tables share no column names"
+        )));
     }
 
-    let mut join_args = JoinArgs::new(JoinType::Left);
+    let mut join_args = JoinArgs::new(join_type);
     join_args.nulls_equal = true;
     let result = left_df
         .join(&right_df, &left_keys, &right_keys, join_args, None)
-        .map_err(|e| DaxError::Eval(format!("NATURALLEFTOUTERJOIN: join failed: {e}")))?;
+        .map_err(|e| DaxError::Eval(format!("{kind}: join failed: {e}")))?;
 
     Ok(Value::Table(left_name, result))
+}
+
+pub fn natural_left_outer_join_fn(
+    args: Vec<Value>,
+    _ctx: &ExecutionContext,
+    _fc: &FilterContext,
+    _rc: &RowContext,
+) -> DaxResult<Value> {
+    natural_join(args, NaturalJoinKind::NaturalLeftOuterJoin)
+}
+
+pub fn natural_inner_join_fn(
+    args: Vec<Value>,
+    _ctx: &ExecutionContext,
+    _fc: &FilterContext,
+    _rc: &RowContext,
+) -> DaxResult<Value> {
+    natural_join(args, NaturalJoinKind::NaturalInnerJoin)
 }
