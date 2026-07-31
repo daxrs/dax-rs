@@ -395,6 +395,16 @@ impl FunctionRegistry {
             Table,
         );
         reg.register_context(
+            "EARLIER",
+            crate::engine::context_functions::earlier_fn,
+            SameAsArg(0),
+        );
+        reg.register_context(
+            "EARLIEST",
+            crate::engine::context_functions::earliest_fn,
+            SameAsArg(0),
+        );
+        reg.register_context(
             "ISINSCOPE",
             crate::engine::context_functions::isinscope_fn,
             Boolean,
@@ -1415,6 +1425,24 @@ impl FunctionRegistry {
             "INFORMATION",
             "Returns a related value from another table following the active relationship.",
             [p!("column", "The related column.")]
+        );
+        m!(
+            "EARLIER",
+            "INFORMATION",
+            "Returns the value of a column in an outer row context, a given number of nesting levels out.",
+            [
+                p!("column", "A column or expression that resolves to a column."),
+                p!("levels", "How many nesting levels out (default 1).", opt)
+            ]
+        );
+        m!(
+            "EARLIEST",
+            "INFORMATION",
+            "Returns the value of a column in the outermost row context.",
+            [p!(
+                "column",
+                "A column or expression that resolves to a column."
+            )]
         );
         m!("ISINSCOPE",     "INFORMATION", "Returns TRUE when the column is an active grouping axis in the current SUMMARIZECOLUMNS context.", [p!("column", "The column to test.")]);
         m!(
