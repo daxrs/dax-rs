@@ -1439,7 +1439,10 @@ impl FunctionRegistry {
             "EARLIEST",
             "INFORMATION",
             "Returns the value of a column in the outermost row context.",
-            [p!("column", "A column or expression that resolves to a column.")]
+            [p!(
+                "column",
+                "A column or expression that resolves to a column."
+            )]
         );
         m!("ISINSCOPE",     "INFORMATION", "Returns TRUE when the column is an active grouping axis in the current SUMMARIZECOLUMNS context.", [p!("column", "The column to test.")]);
         m!(
