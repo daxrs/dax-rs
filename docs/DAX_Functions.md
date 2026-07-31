@@ -1,8 +1,16 @@
-# DAX Functions — Implementation Status
+---
+title: "DAX functions"
+description: "An overview of the DAX functions supported."
+weight: 3
+icon: "terminal"
+status: "Latest Release"
+lastUpdated: "July 2026"
+---
+
 
 | Compliant | Partial | Pending | Total |
 |-----------|---------|---------|-------|
-|       122 |       0 |      89 |   211 |
+|       126 |       0 |     115 |   241 |
 
 Each function is marked **Compliant** (matches DAX behaviour for all documented inputs), **Partial** (works for common cases but has known gaps), or **Pending** (not yet implemented).
 
@@ -85,11 +93,13 @@ Each function is marked **Compliant** (matches DAX behaviour for all documented 
 | `ALLEXCEPT(table, column, ...)`                            | Compliant |       |
 | `REMOVEFILTERS(table \| column, ...)`                      | Compliant |       |
 | `SUMMARIZE(table, col, ..., name, expr, ...)`              | Compliant |       |
+| `ALLCROSSFILTERED(table)`                                  | Pending   |       |
+| `ALLNOBLANKROW(table \| column)`                            | Pending   |       |
 | `DISTINCT(column \| table)`                                | Compliant |       |
 | `ROW(name, expr, ...)`                                     | Compliant |       |
 | `ADDCOLUMNS(table, name, expr, ...)`                       | Compliant |       |
 | `SAMPLE(n, table, orderBy, [order], ...)`                  | Compliant |       |
-| `SELECTCOLUMNS(table, name, expr, ...)`                    | Pending   | Like `ADDCOLUMNS` but starts from an empty table; same row-iteration approach. Medium complexity. |
+| `SELECTCOLUMNS(table, name, expr, ...)`                    | Compliant |       |
 | `SUMMARIZECOLUMNS(col, ..., filter, ..., name, expr, ...)` | Compliant |       |
 | `GROUPBY(table, col, ..., name, expr, ...)`                | Compliant |       |
 | `RANKX(table, expr [, value, order, ties])`                | Pending   | Needs a full table scan to build a sorted rank map, then a second pass to look up each row. Medium–high complexity; tie-handling (Skip/Dense) adds branching. |
@@ -102,7 +112,7 @@ Each function is marked **Compliant** (matches DAX behaviour for all documented 
 | `UNION(table1, table2, ...)`                               | Compliant |       |
 | `NATURALLEFTOUTERJOIN(left, right)`                        | Compliant |       |
 | `NATURALINNERJOIN(left, right)`                            | Compliant |       |
-| `SUBSTITUTEWITHINDEX(table, name, indexTable, col, order)` | Compliant | |
+| `SUBSTITUTEWITHINDEX(table, name, indexTable, col, order)` | Compliant |       |
 
 ---
 
@@ -111,6 +121,7 @@ Each function is marked **Compliant** (matches DAX behaviour for all documented 
 | Function                                              | Status    | Notes |
 |-------------------------------------------------------|-----------|-------|
 | `CALCULATE(expr, filter, ...)`                        | Compliant |       |
+| `CALCULATETABLE(table_expr, filter, ...)`             | Compliant |       |
 | `SELECTEDVALUE(column [, alternate])`                 | Compliant |       |
 | `ISINSCOPE(column)`                                   | Compliant |       |
 | `ISFILTERED(column)`                                  | Compliant |       |
@@ -119,6 +130,8 @@ Each function is marked **Compliant** (matches DAX behaviour for all documented 
 | `USERELATIONSHIP(col1, col2)`                         | Compliant |       |
 | `CROSSFILTER(col1, col2, direction)`                  | Compliant |       |
 | `TREATAS(table_expression, column1 [, column2, ...])` | Compliant |       |
+| `EARLIER(column [, number])`                          | Pending   |       |
+| `EARLIEST(column)`                                    | Pending   |       |
 
 ---
 
@@ -136,22 +149,54 @@ Each function is marked **Compliant** (matches DAX behaviour for all documented 
 | Function                                          | Status    | Notes |
 |---------------------------------------------------|-----------|-------|
 | `LOOKUPVALUE(result_col, search_col, value, ...)` | Compliant |       |
+| `LOOKUP(result_columnName, ...)`                  | Pending   |       |
+| `LOOKUPWITHTOTALS(result_columnName, ...)`        | Pending   |       |
 | `CONTAINS(table, col, value, ...)`                | Compliant |       |
+
+---
+
+## Window Functions
+
+| Function                                                | Status  | Notes |
+|----------------------------------------------------------|---------|-------|
+| `INDEX(position [, orderBy [, blanks [, partitionBy [, matchBy [, default]]]]])` | Pending |       |
+| `OFFSET(delta [, orderBy [, blanks [, partitionBy [, matchBy [, default]]]]])`   | Pending |       |
+| `RANK(...)`                                               | Pending |       |
+| `ROWNUMBER(...)`                                          | Pending |       |
+| `WINDOW(from [, from_type], to [, to_type] [, orderBy [, partitionBy [, matchBy [, relative]]]])` | Pending |       |
+| `ORDERBY(expr [, order] [, ...])`                          | Pending |       |
+| `PARTITIONBY(column [, ...])`                              | Pending |       |
+| `MATCHBY(column [, ...])`                                  | Pending |       |
+| `FIRST()`                                                  | Pending |       |
+| `LAST()`                                                   | Pending |       |
+| `NEXT()`                                                   | Pending |       |
+| `PREVIOUS()`                                               | Pending |       |
+| `RANGE(...)`                                               | Pending |       |
+| `RUNNINGSUM(expr [, ...])`                                 | Pending |       |
+| `MOVINGAVERAGE(expr, n [, ...])`                           | Pending |       |
 
 ---
 
 ## Logical Functions
 
-| Function                                      | Status    | Notes |
-|-----------------------------------------------|-----------|-------|
-| `IF(condition, true_result [, false_result])` | Compliant |       |
-| `SWITCH(expr, val1, result1, ... [, else])`   | Compliant |       |
-| `AND(a, b)`                                   | Compliant |       |
-| `OR(a, b)`                                    | Compliant |       |
-| `NOT(logical)`                                | Compliant |       |
-| `TRUE()`                                      | Compliant |       |
-| `FALSE()`                                     | Compliant |       |
-| `BLANK()`                                     | Compliant |       |
+| Function                                                        | Status    | Notes |
+|-----------------------------------------------------------------|-----------|-------|
+| `IF(condition, true_result [, false_result])`                   | Compliant |       |
+| `SWITCH(expr, val1, result1, ... [, else])`                     | Compliant |       |
+| `AND(a, b)`                                                     | Compliant |       |
+| `OR(a, b)`                                                      | Compliant |       |
+| `NOT(logical)`                                                  | Compliant |       |
+| `TRUE()`                                                        | Compliant |       |
+| `FALSE()`                                                       | Compliant |       |
+| `BLANK()`                                                       | Compliant |       |
+| `COALESCE(<expression>, <expression>[, <expression>]…)`         | Pending   |       |
+| `BITAND(<number>, <number>)`                                    | Pending   |       |
+| `BITOR(<number>, <number>)`                                     | Pending   |       |
+| `BITXOR(<number>, <number>)`                                    | Pending   |       |
+| `BITLSHIFT(<Number>, <Shift_Amount>)`                           | Pending   |       |
+| `BITRSHIFT(<Number>, <Shift_Amount>)`                           | Pending   |       |
+| `IF.EAGER(<logical_test>, <value_if_true>[, <value_if_false>])` | Pending   |       |
+| `IFERROR(value, value_if_error)`                                | Pending   |       |
 
 ---
 
@@ -311,3 +356,4 @@ Each function is marked **Compliant** (matches DAX behaviour for all documented 
 | kpi                       | Unknown    |                     |       |
 | hierarchies               | Unknown    |                     |       |
 | roles                     | Unknown    |                     |       |
+| calculation groups        | Unknown    |                     |       |

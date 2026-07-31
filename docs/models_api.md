@@ -1,4 +1,11 @@
-# Models REST API
+---
+title: "Models REST API"
+description: "How to interact with the models API to load and update models"
+weight: 4
+icon: "verified_user"
+status: "Latest Release"
+lastUpdated: "July 2026"
+---
 
 Base URL: `http://localhost:3000`
 

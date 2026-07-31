@@ -1,4 +1,11 @@
-# TMSL Model Documentation
+---
+title: "TMSL Model"
+description: "The TMSL model structure supported by dax-rs."
+weight: 5
+icon: "info"
+status: "Latest Release"
+lastUpdated: "July 2026"
+---
 
 This document describes the subset of Tabular Model Scripting Language (TMSL) that
 `dax-rs` can read and write. The format is a JSON file that describes tables,
