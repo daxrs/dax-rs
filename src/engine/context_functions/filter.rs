@@ -5,7 +5,7 @@ use crate::engine::error::{DaxError, DaxResult};
 use crate::engine::expressions::Value;
 use crate::engine::ir::expr_node::BoundExprNode;
 use crate::engine::ir::operator::{BoundColumn, BoundFunction};
-use crate::engine::row_context::RowContext;
+use crate::engine::row_context::{needs_row_context, RowContext, RowFrameCursor};
 
 use super::select_unique;
 
@@ -13,7 +13,7 @@ use super::select_unique;
 
 pub fn filter_fn(
     args: Vec<BoundExprNode>,
-    _ctx: &ExecutionContext,
+    ctx: &ExecutionContext,
     fc: &FilterContext,
     rc: &RowContext,
     eval: &dyn Fn(BoundExprNode, &FilterContext, &RowContext) -> DaxResult<Value>,
@@ -36,21 +36,43 @@ pub fn filter_fn(
         }
     };
 
-    let rc_scoped = rc.with_table_scope(table_name.clone(), df.clone());
-    let condition = eval(condition_expr, fc, &rc_scoped)?;
-
-    let mask: BooleanChunked = match condition {
-        Value::Series(s) => s
-            .bool()
-            .map_err(|_| {
-                DaxError::Type("FILTER condition must evaluate to a boolean series".into())
-            })?
-            .clone(),
-        Value::Boolean(b) => BooleanChunked::new("mask".into(), vec![b; df.height()]),
-        other => {
-            return Err(DaxError::Type(format!(
-                "FILTER condition must be boolean, got {other:?}"
-            )))
+    // EARLIER/EARLIEST need a genuine per-row RowContext frame to reach back
+    // into — the ordinary vectorized path below never pushes one, so fall
+    // back to a slower row-by-row evaluation when the condition needs it.
+    let mask: BooleanChunked = if needs_row_context(&condition_expr, ctx) {
+        let frame_table = table_name
+            .find('[')
+            .map_or(table_name.as_str(), |i| &table_name[..i]);
+        let mut cursor = RowFrameCursor::new(frame_table, &df, &[&condition_expr], ctx)?;
+        let mut keep = Vec::with_capacity(df.height());
+        for _ in 0..df.height() {
+            let frame = cursor.next_frame();
+            let rc_row = rc.with_frame(frame);
+            match eval(condition_expr.clone(), fc, &rc_row)? {
+                Value::Boolean(b) => keep.push(b),
+                other => {
+                    return Err(DaxError::Type(format!(
+                        "FILTER condition must be boolean, got {other:?}"
+                    )))
+                }
+            }
+        }
+        BooleanChunked::new("mask".into(), keep)
+    } else {
+        let rc_scoped = rc.with_table_scope(table_name.clone(), df.clone());
+        match eval(condition_expr, fc, &rc_scoped)? {
+            Value::Series(s) => s
+                .bool()
+                .map_err(|_| {
+                    DaxError::Type("FILTER condition must evaluate to a boolean series".into())
+                })?
+                .clone(),
+            Value::Boolean(b) => BooleanChunked::new("mask".into(), vec![b; df.height()]),
+            other => {
+                return Err(DaxError::Type(format!(
+                    "FILTER condition must be boolean, got {other:?}"
+                )))
+            }
         }
     };
 

@@ -187,6 +187,82 @@ pub fn isfiltered_fn(
     Ok(Value::Boolean(filtered))
 }
 
+// EARLIER(column [, levels]) -------------------------------------------------
+
+pub fn earlier_fn(
+    args: Vec<BoundExprNode>,
+    _ctx: &ExecutionContext,
+    fc: &FilterContext,
+    rc: &RowContext,
+    eval: &dyn Fn(BoundExprNode, &FilterContext, &RowContext) -> DaxResult<Value>,
+) -> DaxResult<Value> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(DaxError::InvalidArgument(
+            "EARLIER requires 1 or 2 arguments".into(),
+        ));
+    }
+    let (table, column) = match &args[0] {
+        BoundExprNode::Column(c) => (c.table.clone(), c.column.clone()),
+        other => {
+            return Err(DaxError::InvalidArgument(format!(
+                "EARLIER: first argument must be a column reference, got {other:?}"
+            )))
+        }
+    };
+    let levels = match args.get(1) {
+        Some(expr) => match eval(expr.clone(), fc, rc)? {
+            Value::Integer(i) if i > 0 => i as usize,
+            Value::Number(n) if n > 0.0 => n as usize,
+            other => {
+                return Err(DaxError::InvalidArgument(format!(
+                    "EARLIER: levels argument must be a positive number, got {other:?}"
+                )))
+            }
+        },
+        None => 1,
+    };
+
+    rc.earlier(&table, &column, levels)
+        .map(|v| v.clone().into())
+        .ok_or_else(|| {
+            DaxError::Eval(format!(
+                "EARLIER: no row context {levels} level(s) out for '{table}[{column}]'"
+            ))
+        })
+}
+
+// EARLIEST(column) ------------------------------------------------------------
+
+pub fn earliest_fn(
+    args: Vec<BoundExprNode>,
+    _ctx: &ExecutionContext,
+    _fc: &FilterContext,
+    rc: &RowContext,
+    _eval: &dyn Fn(BoundExprNode, &FilterContext, &RowContext) -> DaxResult<Value>,
+) -> DaxResult<Value> {
+    if args.len() != 1 {
+        return Err(DaxError::InvalidArgument(
+            "EARLIEST requires exactly 1 argument".into(),
+        ));
+    }
+    let (table, column) = match &args[0] {
+        BoundExprNode::Column(c) => (c.table.clone(), c.column.clone()),
+        other => {
+            return Err(DaxError::InvalidArgument(format!(
+                "EARLIEST: argument must be a column reference, got {other:?}"
+            )))
+        }
+    };
+
+    rc.earliest(&table, &column)
+        .map(|v| v.clone().into())
+        .ok_or_else(|| {
+            DaxError::Eval(format!(
+                "EARLIEST: no outer row context for '{table}[{column}]'"
+            ))
+        })
+}
+
 // CONTAINS(table, column, value, ...) ---------------------------------------
 
 pub fn contains_fn(
