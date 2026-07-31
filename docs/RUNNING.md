@@ -1,3 +1,11 @@
+---
+title: "Running"
+description: "A runthrough of how you can run Dax-rs xmla server."
+weight: 1
+icon: "download"
+status: "Latest Release"
+lastUpdated: "July 2026"
+---
 
 ## Run server
 
