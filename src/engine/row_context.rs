@@ -171,6 +171,33 @@ impl RowContext {
         None
     }
 
+    /// Look up a column value from an outer row frame, `levels` steps out
+    /// from the innermost (current) matching one — DAX's EARLIER(column,
+    /// levels). `levels` is 1-based per DAX's own convention (1 = the first
+    /// ancestor frame)
+    pub fn earlier(&self, table: &str, column: &str, levels: usize) -> Option<&ScalarValue> {
+        let key = (table.to_string(), column.to_string());
+        let qualified_key = (table.to_string(), TableCol::new(table, column).to_string());
+        self.frames
+            .iter()
+            .rev()
+            .filter_map(|frame| frame.get(&key).or_else(|| frame.get(&qualified_key)))
+            .nth(levels)
+    }
+
+    /// Look up a column value from the outermost ancestor frame — DAX's
+    /// EARLIEST(column).
+    pub fn earliest(&self, table: &str, column: &str) -> Option<&ScalarValue> {
+        let key = (table.to_string(), column.to_string());
+        let qualified_key = (table.to_string(), TableCol::new(table, column).to_string());
+        let mut matches = self
+            .frames
+            .iter()
+            .filter_map(|frame| frame.get(&key).or_else(|| frame.get(&qualified_key)));
+        let outermost = matches.next()?;
+        matches.next().is_some().then_some(outermost)
+    }
+
     /// Return a clone of this context with a new row frame pushed on top.
     pub fn with_frame(&self, frame: HashMap<(String, String), ScalarValue>) -> Self {
         let mut new = self.clone();
@@ -315,6 +342,81 @@ fn referenced_columns_for(
         .iter()
         .all(|e| collect_referenced_columns(e, table_name, ctx, &mut visited, &mut out));
     safe.then_some(out)
+}
+
+/// Does this expression tree (transitively, through measures) require a
+/// genuine per-row RowContext frame to evaluate correctly — currently true
+/// only for EARLIER/EARLIEST. Vectorized table-shaping functions (FILTER,
+/// etc.) use this to decide whether to fall back to a slower row-by-row
+/// evaluation that actually pushes a frame; a vectorized `table_scope`
+/// evaluation never pushes one, so EARLIER/EARLIEST can't see anything
+/// through it.
+pub(crate) fn needs_row_context(expr: &BoundExprNode, ctx: &ExecutionContext) -> bool {
+    fn walk(
+        expr: &BoundExprNode,
+        ctx: &ExecutionContext,
+        visited_measures: &mut HashSet<String>,
+    ) -> bool {
+        match expr {
+            BoundExprNode::Literal(_)
+            | BoundExprNode::Table(_)
+            | BoundExprNode::VarRef(_)
+            | BoundExprNode::Column(_) => false,
+            BoundExprNode::Measure(m) => {
+                if !visited_measures.insert(m.name.clone()) {
+                    return false; // cycle guard
+                }
+                match ctx.resolved_measures.get(&m.name) {
+                    Some(tree) => walk(tree, ctx, visited_measures),
+                    None => false,
+                }
+            }
+            BoundExprNode::UnaryOp(op) => walk(&op.expr, ctx, visited_measures),
+            BoundExprNode::BinaryOp(op) => {
+                walk(&op.left, ctx, visited_measures) || walk(&op.right, ctx, visited_measures)
+            }
+            BoundExprNode::Function(f) => {
+                let name = f.name.to_ascii_uppercase();
+                name == "EARLIER"
+                    || name == "EARLIEST"
+                    || f.args.iter().any(|a| walk(a, ctx, visited_measures))
+            }
+            BoundExprNode::Calculate(c) => walk(&c.expression, ctx, visited_measures),
+            BoundExprNode::Summarize(s) => {
+                walk(&s.table, ctx, visited_measures)
+                    || s.group_by.iter().any(|g| walk(g, ctx, visited_measures))
+                    || s.rollup_cols
+                        .iter()
+                        .any(|(c, _)| walk(c, ctx, visited_measures))
+                    || s.extensions
+                        .iter()
+                        .any(|(_, e)| walk(e, ctx, visited_measures))
+            }
+            BoundExprNode::SummarizeColumns(s) => {
+                s.group_by_cols
+                    .iter()
+                    .any(|g| walk(g, ctx, visited_measures))
+                    || s.rollup_groups
+                        .iter()
+                        .flatten()
+                        .any(|(cols, _)| cols.iter().any(|c| walk(c, ctx, visited_measures)))
+                    || s.filters.iter().any(|f| walk(f, ctx, visited_measures))
+                    || s.extensions
+                        .iter()
+                        .any(|(_, e, _)| walk(e, ctx, visited_measures))
+            }
+            BoundExprNode::TableConstructor(rows) => rows
+                .iter()
+                .any(|row| row.iter().any(|e| walk(e, ctx, visited_measures))),
+            BoundExprNode::Var(v) => {
+                v.bindings
+                    .iter()
+                    .any(|(_, e)| walk(e, ctx, visited_measures))
+                    || walk(&v.result, ctx, visited_measures)
+            }
+        }
+    }
+    walk(expr, ctx, &mut HashSet::new())
 }
 
 enum ColumnCursor<'a> {

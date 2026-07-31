@@ -10,7 +10,7 @@ lastUpdated: "July 2026"
 
 | Compliant | Partial | Pending | Total |
 |-----------|---------|---------|-------|
-|       126 |       0 |     115 |   241 |
+|       128 |       0 |     113 |   241 |
 
 Each function is marked **Compliant** (matches DAX behaviour for all documented inputs), **Partial** (works for common cases but has known gaps), or **Pending** (not yet implemented).
 
@@ -130,8 +130,8 @@ Each function is marked **Compliant** (matches DAX behaviour for all documented 
 | `USERELATIONSHIP(col1, col2)`                         | Compliant |       |
 | `CROSSFILTER(col1, col2, direction)`                  | Compliant |       |
 | `TREATAS(table_expression, column1 [, column2, ...])` | Compliant |       |
-| `EARLIER(column [, number])`                          | Pending   |       |
-| `EARLIEST(column)`                                    | Pending   |       |
+| `EARLIER(column [, number])`                          | Compliant |       |
+| `EARLIEST(column)`                                    | Compliant |       |
 
 ---
 
