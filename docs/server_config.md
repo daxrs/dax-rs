@@ -1,4 +1,11 @@
-# Server Configuration
+---
+title: "Configuration"
+description: "How to configure the server to match your setup."
+weight: 2
+icon: "settings_input_component"
+status: "Latest Release"
+lastUpdated: "July 2026"
+---
 
 The server reads configuration from three sources in increasing priority order:
 

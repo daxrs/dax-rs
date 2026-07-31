@@ -1,4 +1,12 @@
-# DAX Functions — Implementation Status
+---
+title: "DAX functions"
+description: "An overview of the DAX functions supported."
+weight: 3
+icon: "terminal"
+status: "Latest Release"
+lastUpdated: "July 2026"
+---
+
 
 | Compliant | Partial | Pending | Total |
 |-----------|---------|---------|-------|
