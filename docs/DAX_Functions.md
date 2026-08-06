@@ -10,7 +10,7 @@ lastUpdated: "July 2026"
 
 | Compliant | Partial | Pending | Total |
 |-----------|---------|---------|-------|
-|       128 |       1 |     112 |   241 |
+|       123 |       6 |     112 |   241 |
 
 Each function is marked **Compliant** (matches DAX behaviour for all documented inputs), **Partial** (works for common cases but has known gaps), or **Pending** (not yet implemented).
 
@@ -94,7 +94,7 @@ Each function is marked **Compliant** (matches DAX behaviour for all documented 
 | `REMOVEFILTERS(table \| column, ...)`                      | Compliant |       |
 | `SUMMARIZE(table, col, ..., name, expr, ...)`              | Compliant |       |
 | `ALLCROSSFILTERED(table)`                                  | Pending   |       |
-| `ALLNOBLANKROW(table \| column)`                            | Pending   |       |
+| `ALLNOBLANKROW(table \| column)`                           | Pending   |       |
 | `DISTINCT(column \| table)`                                | Compliant |       |
 | `ROW(name, expr, ...)`                                     | Compliant |       |
 | `ADDCOLUMNS(table, name, expr, ...)`                       | Compliant |       |
@@ -122,7 +122,7 @@ Each function is marked **Compliant** (matches DAX behaviour for all documented 
 |-------------------------------------------------------|-----------|-------|
 | `CALCULATE(expr, filter, ...)`                        | Compliant |       |
 | `CALCULATETABLE(table_expr, filter, ...)`             | Compliant |       |
-| `SELECTEDVALUE(column [, alternate])`                 | Compliant |       |
+| `SELECTEDVALUE(column [, alternate])`                 | Partial   | If alternate is of a different type should return variant |
 | `ISINSCOPE(column)`                                   | Compliant |       |
 | `ISFILTERED(column)`                                  | Compliant |       |
 | `ALLSELECTED(table \| column, ...)`                   | Compliant |       |
@@ -148,7 +148,7 @@ Each function is marked **Compliant** (matches DAX behaviour for all documented 
 
 | Function                                          | Status    | Notes |
 |---------------------------------------------------|-----------|-------|
-| `LOOKUPVALUE(result_col, search_col, value, ...)` | Compliant |       |
+| `LOOKUPVALUE(result_col, search_col, value, ...)` | Partial   | Fix return type, including Variant if columns have different types |
 | `LOOKUP(result_columnName, ...)`                  | Pending   |       |
 | `LOOKUPWITHTOTALS(result_columnName, ...)`        | Pending   |       |
 | `CONTAINS(table, col, value, ...)`                | Compliant |       |
@@ -181,8 +181,8 @@ Each function is marked **Compliant** (matches DAX behaviour for all documented 
 
 | Function                                                        | Status    | Notes |
 |-----------------------------------------------------------------|-----------|-------|
-| `IF(condition, true_result [, false_result])`                   | Compliant |       |
-| `SWITCH(expr, val1, result1, ... [, else])`                     | Compliant |       |
+| `IF(condition, true_result [, false_result])`                   | Partial   | Misreports return type, needs variant type if true_result and false_result is not the same type |
+| `SWITCH(expr, val1, result1, ... [, else])`                     | Partial   | Misreports return type, needs variant type if all return types are not the same |
 | `AND(a, b)`                                                     | Compliant |       |
 | `OR(a, b)`                                                      | Compliant |       |
 | `NOT(logical)`                                                  | Compliant |       |
@@ -206,7 +206,7 @@ Each function is marked **Compliant** (matches DAX behaviour for all documented 
 |------------------------------------------------|-----------|-------|
 | `ABS(number)`                                  | Compliant |       |
 | `ROUND(number, digits)`                        | Compliant |       |
-| `DIVIDE(numerator, denominator [, alternate])` | Compliant |       |
+| `DIVIDE(numerator, denominator [, alternate])` | Partial   | If alternate is not Float it must return Variant |
 | `EVEN(number)`                                 | Compliant |       |
 | `ODD(number)`                                  | Compliant |       |
 | `EXP(number)`                                  | Compliant |       |
