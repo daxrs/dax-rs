@@ -10,7 +10,7 @@ lastUpdated: "July 2026"
 
 | Compliant | Partial | Pending | Total |
 |-----------|---------|---------|-------|
-|       128 |       0 |     113 |   241 |
+|       128 |       1 |     112 |   241 |
 
 Each function is marked **Compliant** (matches DAX behaviour for all documented inputs), **Partial** (works for common cases but has known gaps), or **Pending** (not yet implemented).
 
@@ -189,7 +189,7 @@ Each function is marked **Compliant** (matches DAX behaviour for all documented 
 | `TRUE()`                                                        | Compliant |       |
 | `FALSE()`                                                       | Compliant |       |
 | `BLANK()`                                                       | Compliant |       |
-| `COALESCE(<expression>, <expression>[, <expression>]…)`         | Pending   |       |
+| `COALESCE(<expression>, <expression>[, <expression>]…)`         | Partial   | Errors if different rows resolve to different value types inside an extension column (ADDCOLUMNS/SUMMARIZECOLUMNS) — Requires a Variant type to fix. Scalar usage is fully compliant. |
 | `BITAND(<number>, <number>)`                                    | Pending   |       |
 | `BITOR(<number>, <number>)`                                     | Pending   |       |
 | `BITXOR(<number>, <number>)`                                    | Pending   |       |
