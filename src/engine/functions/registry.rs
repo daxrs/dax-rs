@@ -55,6 +55,10 @@ pub enum ReturnType {
     /// `a` first — for IF's true/false branches, where either may be an
     /// untyped BLANK() and the other carries the real type.
     SameAsEitherArg(usize, usize),
+    /// The first argument (in order) that has a known dtype — COALESCE's
+    /// generalization of `SameAsEitherArg` to arbitrary arity, since its
+    /// argument count isn't fixed at 2.
+    SameAsFirstKnownArg,
 }
 
 impl ReturnType {
@@ -77,6 +81,7 @@ impl ReturnType {
                 .cloned()
                 .flatten()
                 .or_else(|| arg_dtypes.get(b).cloned().flatten()),
+            ReturnType::SameAsFirstKnownArg => arg_dtypes.iter().find_map(|d| d.clone()),
         }
     }
 }
@@ -373,6 +378,11 @@ impl FunctionRegistry {
             "IF",
             crate::engine::context_functions::if_fn,
             SameAsEitherArg(1, 2),
+        );
+        reg.register_context(
+            "COALESCE",
+            crate::engine::context_functions::coalesce_fn,
+            SameAsFirstKnownArg,
         );
         reg.register(
             "ERROR",
@@ -1168,6 +1178,19 @@ impl FunctionRegistry {
             [p!("value", "The value to test.")]
         );
         m!("BLANK", "LOGICAL", "Returns a blank value.", []);
+        m!(
+            "COALESCE",
+            "LOGICAL",
+            "Returns the first non-blank value among the given expressions, evaluated in order.",
+            [
+                p!("value1", "The first expression to evaluate."),
+                p!(
+                    "value2",
+                    "Additional expressions, evaluated in order until one is non-blank.",
+                    rep
+                )
+            ]
+        );
         m!(
             "ERROR",
             "LOGICAL",
