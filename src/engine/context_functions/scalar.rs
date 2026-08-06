@@ -45,6 +45,29 @@ pub fn if_fn(
     }
 }
 
+// COALESCE(value1, value2[, value3, ...]) ------------------------------------
+
+pub fn coalesce_fn(
+    args: Vec<BoundExprNode>,
+    _ctx: &ExecutionContext,
+    fc: &FilterContext,
+    rc: &RowContext,
+    eval: &dyn Fn(BoundExprNode, &FilterContext, &RowContext) -> DaxResult<Value>,
+) -> DaxResult<Value> {
+    if args.len() < 2 {
+        return Err(DaxError::InvalidArgument(
+            "COALESCE requires at least 2 arguments".into(),
+        ));
+    }
+    for arg in args {
+        match eval(arg, fc, rc)? {
+            Value::Blank => continue,
+            other => return Ok(other),
+        }
+    }
+    Ok(Value::Blank)
+}
+
 // SELECTEDVALUE(column[, alternateResult]) ----------------------------------
 
 pub fn selectedvalue_fn(
