@@ -1,5 +1,5 @@
 ---
-title: "Configuration"
+title: "Server Configuration"
 description: "How to configure the server to match your setup."
 weight: 2
 icon: "settings_input_component"
@@ -55,7 +55,7 @@ The XMLA endpoint URL (`http://<hostname>:<port>/xmla`) and the MSOLAP connectio
 
 An invalid IANA name in `timezone` is logged as a warning at startup and falls back to the system-local timezone rather than failing to start.
 
-### `[concurrency]`
+### Concurrency
 
 Controls the optional concurrency limiter. When enabled, requests that arrive while `max_concurrency` requests are already in flight are queued. Requests that wait longer than `max_wait_secs` are rejected with `429 Too Many Requests`.
 
@@ -64,7 +64,7 @@ Controls the optional concurrency limiter. When enabled, requests that arrive wh
 | `max_concurrency` | integer | `0`     | Maximum simultaneous requests. `0` disables the limiter entirely.    |
 | `max_wait_secs`   | integer | `30`    | Seconds a queued request will wait for a slot before being rejected. |
 
-### `[storage]`
+### Storage
 
 Controls where the server reads TMSL model files and parquet dataset files from. Two independent backends are configured: `models` (TMSL files) and `datasets` (parquet files). If the `storage` section is omitted both default to the local filesystem with root `./demodata`, which is where the demo dataset (`generate-demodata`) lands by default.
 

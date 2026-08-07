@@ -1,6 +1,6 @@
 ---
-title: "Running"
-description: "A runthrough of how you can run Dax-rs xmla server."
+title: "Running the DAX & XMLA Server"
+description: "How to run the dax-rs DAX/XMLA server — locally, in Docker, or with S3 datasets. CLI flags, demo data, and health checks."
 weight: 1
 icon: "download"
 status: "Latest Release"
