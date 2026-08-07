@@ -1,7 +1,7 @@
 ---
-title: "TMSL Model"
+title: "TMSL Model Documentation"
 description: "The TMSL model structure supported by dax-rs."
-weight: 5
+weight: 6
 icon: "info"
 status: "Latest Release"
 lastUpdated: "July 2026"
