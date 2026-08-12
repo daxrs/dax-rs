@@ -445,7 +445,12 @@ fn build_slicer(pair: Pair<Rule>) -> Vec<MemberExpr> {
 fn build_prop_list(pair: Pair<Rule>) -> Vec<String> {
     pair.into_inner()
         .filter(|p| p.as_rule() == Rule::prop_name)
-        .map(|p| p.as_str().trim_start_matches('[').trim_end_matches(']').to_string())
+        .map(|p| {
+            p.as_str()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_string()
+        })
         .collect()
 }
 
