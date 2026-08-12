@@ -2118,6 +2118,30 @@ mod tests {
     }
 
     #[test]
+    fn translate_bracketed_dimension_properties_matches_unbracketed() {
+        // [MEMBER_UNIQUE_NAME],[MEMBER_CAPTION] (bracketed) must parse identically
+        // to MEMBER_UNIQUE_NAME,MEMBER_CAPTION (unbracketed).
+        let bracketed = parse_mdx(concat!(
+            "WITH MEASURE 'Sales'[Qty] = SUM('Sales'[Quantity]) ",
+            "SELECT {[Measures].[Qty]} DIMENSION PROPERTIES [MEMBER_UNIQUE_NAME],[MEMBER_CAPTION] ON COLUMNS ",
+            "FROM [Model]",
+        ))
+        .unwrap();
+        let unbracketed = parse_mdx(concat!(
+            "WITH MEASURE 'Sales'[Qty] = SUM('Sales'[Quantity]) ",
+            "SELECT {[Measures].[Qty]} DIMENSION PROPERTIES MEMBER_UNIQUE_NAME,MEMBER_CAPTION ON COLUMNS ",
+            "FROM [Model]",
+        ))
+        .unwrap();
+
+        assert_eq!(
+            bracketed.axes[0].dim_props,
+            ["MEMBER_UNIQUE_NAME", "MEMBER_CAPTION"]
+        );
+        assert_eq!(bracketed.axes[0].dim_props, unbracketed.axes[0].dim_props);
+    }
+
+    #[test]
     fn translate_single_axis_crossjoin_on_columns() {
         let q = parse_mdx(concat!(
             "WITH MEASURE 'Sales'[CIMSummen af Amount] = SUM('Sales'[Amount]) ",
