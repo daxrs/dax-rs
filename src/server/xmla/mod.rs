@@ -364,10 +364,59 @@ async fn xmla_handler(State(state): State<AppState>, headers: HeaderMap, body: B
                                     .0,
                                 );
                             }
+                            QueryShape::DimMeasureMatrix {
+                                ref dim_axis,
+                                ref measures,
+                                ..
+                            } => {
+                                let n = measures.len();
+                                let cells: Vec<(String, Vec<Option<String>>)> = if let Some(
+                                    ref dax,
+                                ) =
+                                    translation.cell_dax
+                                {
+                                    match d.execute_dax(dax) {
+                                        Ok(results) => results
+                                            .into_iter()
+                                            .next()
+                                            .map(|qr| {
+                                                qr.rows
+                                                    .into_iter()
+                                                    .filter_map(|row| {
+                                                        let k =
+                                                            row.first().and_then(|v| v.clone())?;
+                                                        let vals = (0..n)
+                                                            .map(|i| {
+                                                                row.get(1 + i)
+                                                                    .and_then(|v| v.clone())
+                                                            })
+                                                            .collect();
+                                                        Some((k, vals))
+                                                    })
+                                                    .collect()
+                                            })
+                                            .unwrap_or_default(),
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                error = %e,
+                                                "MDX tabular dim-measure-matrix failed"
+                                            );
+                                            vec![]
+                                        }
+                                    }
+                                } else {
+                                    vec![]
+                                };
+                                return finish(
+                                    &handlers::execute_mdx_tabular_dim_measure(
+                                        sid, dim_axis, measures, &cells,
+                                    )
+                                    .0,
+                                );
+                            }
                             QueryShape::Scalar { .. }
                             | QueryShape::SingleAxisCrossJoin { .. }
                             | QueryShape::CrossJoinMatrix { .. }
-                            | QueryShape::DimMeasureMatrix { .. }
                             | QueryShape::TwoHierWithMeasures { .. }
                             | QueryShape::TwoDimAxes { .. }
                             | QueryShape::TwoHierDim { .. }

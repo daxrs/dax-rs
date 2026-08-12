@@ -2185,6 +2185,70 @@ pub fn execute_mdx_tabular_measures_only(
     execute_xml(session_id, rowset(&schema, &row))
 }
 
+pub fn execute_mdx_tabular_dim_measure(
+    session_id: Option<&str>,
+    dim_axis: &crate::mdx::AxisPlan,
+    measures: &[(String, String)],
+    cells: &[(String, Vec<Option<String>>)],
+) -> (String, Response) {
+    let hier_uname = format!("[{}].[{}]", dim_axis.table, dim_axis.hier);
+    let field_prefix = format!(
+        "[{}].[{}].[{}]",
+        dim_axis.table, dim_axis.hier, dim_axis.level
+    );
+
+    let dim_props: Vec<&str> = dim_axis
+        .dim_props
+        .iter()
+        .map(|p| p.as_str())
+        .filter(|p| *p == "MEMBER_UNIQUE_NAME" || *p == "MEMBER_CAPTION")
+        .collect();
+
+    let mut fields: Vec<(String, Option<&str>)> = dim_props
+        .iter()
+        .map(|p| (format!("{field_prefix}.[{p}]"), Some("string")))
+        .collect();
+    fields.extend(
+        measures
+            .iter()
+            .map(|(name, _)| (format!("[Measures].[{name}]"), None)),
+    );
+
+    let columns: Vec<(&str, Option<&str>)> = fields.iter().map(|(f, t)| (f.as_str(), *t)).collect();
+    let schema = make_tabular_schema(&columns);
+
+    let mut rows_xml = String::new();
+    for (key, vals) in cells {
+        rows_xml.push_str("<row>");
+        let mut col_idx = 0;
+        for prop in &dim_props {
+            match *prop {
+                "MEMBER_UNIQUE_NAME" => {
+                    let uname = member_unique_name(&hier_uname, key);
+                    rows_xml.push_str(&format!("<C{col_idx}>{uname}</C{col_idx}>"));
+                }
+                "MEMBER_CAPTION" => {
+                    rows_xml.push_str(&format!(
+                        "<C{col_idx}>{}</C{col_idx}>",
+                        xml_escape_value(key)
+                    ));
+                }
+                _ => {}
+            }
+            col_idx += 1;
+        }
+        for val in vals {
+            if let Some(v) = val {
+                rows_xml.push_str(&format!("<C{col_idx}>{}</C{col_idx}>", xml_escape_value(v)));
+            }
+            col_idx += 1;
+        }
+        rows_xml.push_str("</row>");
+    }
+
+    execute_xml(session_id, rowset(&schema, &rows_xml))
+}
+
 fn xml_escape_value(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
