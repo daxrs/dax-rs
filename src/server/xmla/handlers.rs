@@ -2166,6 +2166,13 @@ fn xml_escape_value(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Builds a leaf member's unique name: `{hier_uname}.&[{caption}]`, with the
+/// `&` written as the XML entity `&amp;` and `caption` XML-escaped.
+/// `hier_uname` must already be XML-safe.
+fn member_unique_name(hier_uname: &str, caption: &str) -> String {
+    format!("{hier_uname}.&amp;[{}]", xml_escape_value(caption))
+}
+
 fn xml_escape_attr(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -4805,8 +4812,7 @@ fn build_leaf_member_tuple(
     dim_props: &[String],
 ) -> String {
     let cap_esc = xml_escape_value(caption);
-    // The unique name uses &[key] syntax; & is encoded as &amp; in XML text.
-    let uname = format!("{}.&amp;[{}]", hier_uname, cap_esc);
+    let uname = member_unique_name(hier_uname, caption);
 
     let mut member = format!(
         concat!(
@@ -5202,10 +5208,11 @@ fn build_norm_members_block_compact(
 
     for val in leaf_values {
         let cap = xml_escape_value(val);
+        let uname = member_unique_name(hier_uname, val);
         members.push_str(&format!(
             concat!(
                 "<ns2:Member>",
-                "<ns2:UName>{hier}.&amp;[{cap}]</ns2:UName>",
+                "<ns2:UName>{uname}</ns2:UName>",
                 "<ns2:Caption>{cap}</ns2:Caption>",
                 "<ns2:LName>{lname}</ns2:LName>",
                 "<ns2:LNum>1</ns2:LNum>",
@@ -5213,6 +5220,7 @@ fn build_norm_members_block_compact(
                 "<ns2:HIERARCHY_UNIQUE_NAME>{hier}</ns2:HIERARCHY_UNIQUE_NAME>",
                 "</ns2:Member>",
             ),
+            uname = uname,
             hier = hier_uname,
             cap = cap,
             lname = xml_escape_value(leaf_lname),
@@ -5268,10 +5276,11 @@ fn build_norm_members_block(
     // Actual leaf members.
     for val in leaf_values {
         let cap = xml_escape_value(val);
+        let uname = member_unique_name(hier_uname, val);
         members.push_str(&format!(
             concat!(
                 "<ns2:Member>",
-                "<ns2:UName>{hier}.&amp;[{cap}]</ns2:UName>",
+                "<ns2:UName>{uname}</ns2:UName>",
                 "<ns2:Caption>{cap}</ns2:Caption>",
                 "<ns2:LName>{lname}</ns2:LName>",
                 "<ns2:LNum>1</ns2:LNum>",
@@ -5279,6 +5288,7 @@ fn build_norm_members_block(
                 "<ns2:HIERARCHY_UNIQUE_NAME>{hier}</ns2:HIERARCHY_UNIQUE_NAME>",
                 "</ns2:Member>",
             ),
+            uname = uname,
             hier = hier_uname,
             cap = cap,
             lname = xml_escape_value(leaf_lname),
