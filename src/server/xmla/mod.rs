@@ -373,23 +373,27 @@ async fn xmla_handler(State(state): State<AppState>, headers: HeaderMap, body: B
                         }
 
                         QueryShape::MeasuresOnly { ref measures } => {
-                            let values: Vec<Option<String>> = measures
-                                .iter()
-                                .map(|(_, expr)| {
-                                    let dax = format!("EVALUATE {{ CALCULATE({}) }}", expr);
-                                    match d.execute_dax(&dax) {
-                                        Ok(results) => results
-                                            .into_iter()
-                                            .next()
-                                            .and_then(|qr| qr.rows.into_iter().next())
-                                            .and_then(|row| row.into_iter().next().flatten()),
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, "MDX meas-only-cols eval failed");
-                                            None
-                                        }
+                            let n = measures.len();
+                            let values: Vec<Option<String>> = if let Some(ref dax) =
+                                translation.cell_dax
+                            {
+                                match d.execute_dax(dax) {
+                                    Ok(results) => results
+                                        .into_iter()
+                                        .next()
+                                        .and_then(|qr| qr.rows.into_iter().next())
+                                        .map(|row| {
+                                            (0..n).map(|i| row.get(i).and_then(|v| v.clone())).collect()
+                                        })
+                                        .unwrap_or_else(|| vec![None; n]),
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "MDX meas-only-cols eval failed");
+                                        vec![None; n]
                                     }
-                                })
-                                .collect();
+                                }
+                            } else {
+                                vec![None; n]
+                            };
                             return finish(
                                 &handlers::execute_mdx_meas_only_cols(
                                     sid,
