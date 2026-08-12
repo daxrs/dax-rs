@@ -617,21 +617,37 @@ fn parse_with_section(
             break;
         }
 
-        // Expression runs until the next MEASURE/MEMBER/SET keyword (or end of section).
-        let expr_end = find_kw(s, "MEASURE")
-            .or_else(|| find_kw(s, "MEMBER"))
-            .or_else(|| find_kw(s, "SET"))
-            .unwrap_or(s.len());
-        let expr = s[..expr_end].trim();
-        // Strip surrounding single quotes (MDX 'As expr' form wraps expression in quotes).
-        let expr = if expr.starts_with('\'') && expr.ends_with('\'') && expr.len() > 2 {
-            &expr[1..expr.len() - 1]
+        // Expression may be quoted (MDX 'AS expr' form) — quoted expressions can be
+        // followed by trailing member properties (e.g. `, SOLVE_ORDER = 65535`),
+        // which run up to the next MEASURE/MEMBER/SET keyword (or end) and are
+        // discarded. Unquoted (DAX MEASURE style) expressions have no such suffix,
+        // so the keyword search directly bounds the expression itself.
+        let expr = if s.starts_with('\'') {
+            let close = match s[1..].find('\'') {
+                Some(p) => p + 1,
+                None => break,
+            };
+            let expr = s[1..close].trim();
+            let after_quote = &s[close + 1..];
+            let props_end = find_kw(after_quote, "MEASURE")
+                .or_else(|| find_kw(after_quote, "MEMBER"))
+                .or_else(|| find_kw(after_quote, "SET"))
+                .unwrap_or(after_quote.len());
+            s = after_quote[props_end..].trim_start();
+            expr
         } else {
+            let expr_end = find_kw(s, "MEASURE")
+                .or_else(|| find_kw(s, "MEMBER"))
+                .or_else(|| find_kw(s, "SET"))
+                .unwrap_or(s.len());
+            let expr = s[..expr_end].trim();
+            s = s[expr_end..].trim_start();
             expr
         };
-        let final_expr = try_translate_cchildren(expr).unwrap_or_else(|| expr.to_string());
+        let final_expr = try_translate_cchildren(expr)
+            .or_else(|| try_translate_count_level(expr))
+            .unwrap_or_else(|| expr.to_string());
         measures.push((name, final_expr));
-        s = s[expr_end..].trim_start();
     }
 }
 
@@ -679,6 +695,53 @@ fn try_translate_cchildren(expr: &str) -> Option<String> {
     Some(format!(
         "IF(ISINSCOPE('{table}'[{hier}]), 0, COUNTROWS(VALUES('{table}'[{hier}])))"
     ))
+}
+
+/// Detect `Count([T].[H].[L])` — Power BI's column-profiling probe that counts
+/// distinct members of an attribute's level — and return the equivalent DAX
+/// expression, or `None` if the pattern doesn't match.
+///
+/// MDX `Count()` over a bare level (no `.Members`, no `EXCLUDEEMPTY`) counts
+/// every member of the level, including any unknown/blank member, so this
+/// maps to `COUNTROWS(VALUES(...))` rather than `DISTINCTCOUNT(...)`.
+fn try_translate_count_level(expr: &str) -> Option<String> {
+    let s = expr.trim();
+
+    let prefix = "Count(";
+    if s.len() < prefix.len() || !s[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        return None;
+    }
+    if !s.ends_with(')') {
+        return None;
+    }
+    let inner = s[prefix.len()..s.len() - 1].trim();
+
+    // [T]
+    if !inner.starts_with('[') {
+        return None;
+    }
+    let t_close = inner[1..].find(']')? + 1;
+    let table = &inner[1..t_close];
+    let rest = inner[t_close + 1..].strip_prefix('.')?;
+
+    // [H]
+    if !rest.starts_with('[') {
+        return None;
+    }
+    let h_close = rest[1..].find(']')? + 1;
+    let rest = rest[h_close + 1..].strip_prefix('.')?;
+
+    // [L] — must be the final segment.
+    if !rest.starts_with('[') {
+        return None;
+    }
+    let l_close = rest[1..].find(']')? + 1;
+    let level = &rest[1..l_close];
+    if !rest[l_close + 1..].is_empty() {
+        return None;
+    }
+
+    Some(format!("COUNTROWS(VALUES('{table}'[{level}]))"))
 }
 
 /// Parse a raw set expression string using the grammar, returning the AST node.
@@ -1030,6 +1093,22 @@ mod tests {
             q.calc_measures[0].1,
             "IF(ISINSCOPE('Product'[Color]), 0, COUNTROWS(VALUES('Product'[Color])))"
         );
+    }
+
+    #[test]
+    fn translate_count_level_measure_expression() {
+        // Power BI Desktop's column-profiling probe: Count([Table].[Attr].[Attr])
+        // counts distinct members of the attribute's level (including any
+        // unknown/blank member), which should translate to COUNTROWS(VALUES(...)).
+        let q = parse_mdx(concat!(
+            "WITH MEMBER [Measures].[TEMP(count)(0)] As ",
+            "'Count([Product].[Color].[Color])' ",
+            "SELECT {[Measures].[TEMP(count)(0)]} ON COLUMNS FROM [Model]",
+        ))
+        .unwrap();
+        assert_eq!(q.calc_measures.len(), 1);
+        assert_eq!(q.calc_measures[0].0, "temp(count)(0)");
+        assert_eq!(q.calc_measures[0].1, "COUNTROWS(VALUES('Product'[Color]))");
     }
 
     #[test]
