@@ -118,7 +118,7 @@ slicer = { "(" ~ member_expr ~ ("," ~ member_expr)* ~ ")" | member_expr }
 // ── property lists ────────────────────────────────────────────────────────────
 
 prop_list = { prop_name ~ ("," ~ prop_name)* }
-prop_name = @{ (ASCII_ALPHANUMERIC | "_")+ }
+prop_name = @{ "[" ~ (ASCII_ALPHANUMERIC | "_")+ ~ "]" | (ASCII_ALPHANUMERIC | "_")+ }
 
 // ── shared terminals ──────────────────────────────────────────────────────────
 
