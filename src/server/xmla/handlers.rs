@@ -86,14 +86,16 @@ fn make_schema(columns: &[(&str, &str)]) -> String {
     )
 }
 
-fn make_dax_schema(columns: &[(&str, &str)]) -> String {
+fn make_tabular_schema(columns: &[(&str, Option<&str>)]) -> String {
     let cols: String = columns
         .iter()
         .enumerate()
         .map(|(i, (field, typ))| {
-            format!(
-                r#"<xsd:element sql:field="{field}" name="C{i}" type="xsd:{typ}" minOccurs="0"/>"#
-            )
+            let type_attr = match typ {
+                Some(t) => format!(r#" type="xsd:{t}""#),
+                None => String::new(),
+            };
+            format!(r#"<xsd:element sql:field="{field}" name="C{i}"{type_attr} minOccurs="0"/>"#)
         })
         .collect();
     format!(
@@ -2111,11 +2113,11 @@ pub fn execute_query_result(
     let mut roots: Vec<String> = Vec::with_capacity(results.len());
     let mut total_rows = 0usize;
     for result in &results {
-        let schema = make_dax_schema(
+        let schema = make_tabular_schema(
             &result
                 .columns
                 .iter()
-                .map(|(name, xsd)| (name.as_str(), xsd.as_str()))
+                .map(|(name, xsd)| (name.as_str(), Some(xsd.as_str())))
                 .collect::<Vec<_>>(),
         );
 
