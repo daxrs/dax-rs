@@ -1103,10 +1103,7 @@ mod tests {
         .unwrap();
         assert_eq!(q.calc_measures.len(), 1);
         assert_eq!(q.calc_measures[0].0, "temp(count)(0)");
-        assert_eq!(
-            q.calc_measures[0].1,
-            "COUNTROWS(VALUES('Product'[Color]))"
-        );
+        assert_eq!(q.calc_measures[0].1, "COUNTROWS(VALUES('Product'[Color]))");
     }
 
     #[test]
