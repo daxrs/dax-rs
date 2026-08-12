@@ -35,6 +35,42 @@ pub fn routes(provider: Arc<dyn ServerProvider>, config: Arc<ServerConfig>) -> R
         .with_state(AppState { provider, config })
 }
 
+enum FormatRequest {
+    Native,
+    Tabular,
+    Multidimensional,
+}
+
+impl FormatRequest {
+    fn parse(raw: Option<&str>) -> Self {
+        match raw {
+            Some(v) if v.eq_ignore_ascii_case("Tabular") => Self::Tabular,
+            Some(v) if v.eq_ignore_ascii_case("Multidimensional") => Self::Multidimensional,
+            _ => Self::Native,
+        }
+    }
+}
+
+enum ResponseFormat {
+    Tabular,
+    Multidimensional,
+}
+
+fn resolve_response_format(
+    format: FormatRequest,
+    is_dax: bool,
+) -> Result<ResponseFormat, String> {
+    match (format, is_dax) {
+        (FormatRequest::Native, true) => Ok(ResponseFormat::Tabular),
+        (FormatRequest::Native, false) => Ok(ResponseFormat::Multidimensional),
+        (FormatRequest::Tabular, _) => Ok(ResponseFormat::Tabular),
+        (FormatRequest::Multidimensional, false) => Ok(ResponseFormat::Multidimensional),
+        (FormatRequest::Multidimensional, true) => {
+            Err("Format=Multidimensional is not supported for DAX queries".to_string())
+        }
+    }
+}
+
 async fn xmla_handler(State(state): State<AppState>, headers: HeaderMap, body: Body) -> Response {
     let provider = &state.provider;
     let config = &state.config;
@@ -288,6 +324,22 @@ async fn xmla_handler(State(state): State<AppState>, headers: HeaderMap, body: B
                     };
 
                     let meta = d.model_meta();
+                    match resolve_response_format(
+                        FormatRequest::parse(execute.format()),
+                        false,
+                    ) {
+                        Ok(ResponseFormat::Multidimensional) => {}
+                        Ok(ResponseFormat::Tabular) => {
+                            return finish(
+                                &handlers::execute_fault(
+                                    sid,
+                                    "Format=Tabular is not yet implemented for MDX queries",
+                                )
+                                .0,
+                            );
+                        }
+                        Err(e) => return finish(&handlers::execute_fault(sid, &e).0),
+                    }
                     match translation.shape {
                         QueryShape::Scalar { .. } => {
                             let scalar_value: Option<String> = if let Some(ref dax) =
@@ -886,6 +938,12 @@ async fn xmla_handler(State(state): State<AppState>, headers: HeaderMap, body: B
                         let Some(d) = db else {
                             return finish(&handlers::execute_empty_rowset(sid).0);
                         };
+
+                        if let Err(e) =
+                            resolve_response_format(FormatRequest::parse(execute.format()), true)
+                        {
+                            return finish(&handlers::execute_fault(sid, &e).0);
+                        }
 
                         let cat = d.name().to_string();
                         let wants_metrics = execute.wants_execution_metrics();

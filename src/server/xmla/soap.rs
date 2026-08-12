@@ -106,6 +106,8 @@ pub struct PropertyList {
     pub catalog: Option<String>,
     #[serde(rename = "ExecutionMetrics")]
     pub execution_metrics: Option<String>,
+    #[serde(rename = "Format")]
+    pub format: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,6 +176,11 @@ impl Execute {
     /// The catalog (database) name from `<Properties><PropertyList><Catalog>`.
     pub fn catalog(&self) -> Option<&str> {
         self.properties.as_ref()?.list.as_ref()?.catalog.as_deref()
+    }
+
+    /// The `<Properties><PropertyList><Format>` value, e.g. "Tabular", "Multidimensional", "Native".
+    pub fn format(&self) -> Option<&str> {
+        self.properties.as_ref()?.list.as_ref()?.format.as_deref()
     }
 
     pub fn parameters(&self) -> HashMap<String, String> {
