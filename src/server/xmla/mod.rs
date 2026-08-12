@@ -329,15 +329,59 @@ async fn xmla_handler(State(state): State<AppState>, headers: HeaderMap, body: B
                         false,
                     ) {
                         Ok(ResponseFormat::Multidimensional) => {}
-                        Ok(ResponseFormat::Tabular) => {
-                            return finish(
-                                &handlers::execute_fault(
-                                    sid,
-                                    "Format=Tabular is not yet implemented for MDX queries",
-                                )
-                                .0,
-                            );
-                        }
+                        Ok(ResponseFormat::Tabular) => match translation.shape {
+                            QueryShape::MeasuresOnly { ref measures } => {
+                                let n = measures.len();
+                                let values: Vec<Option<String>> = if let Some(ref dax) =
+                                    translation.cell_dax
+                                {
+                                    match d.execute_dax(dax) {
+                                        Ok(results) => results
+                                            .into_iter()
+                                            .next()
+                                            .and_then(|qr| qr.rows.into_iter().next())
+                                            .map(|row| {
+                                                (0..n)
+                                                    .map(|i| row.get(i).and_then(|v| v.clone()))
+                                                    .collect()
+                                            })
+                                            .unwrap_or_else(|| vec![None; n]),
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                error = %e,
+                                                "MDX tabular meas-only eval failed"
+                                            );
+                                            vec![None; n]
+                                        }
+                                    }
+                                } else {
+                                    vec![None; n]
+                                };
+                                return finish(
+                                    &handlers::execute_mdx_tabular_measures_only(
+                                        sid, measures, &values,
+                                    )
+                                    .0,
+                                );
+                            }
+                            QueryShape::Scalar { .. }
+                            | QueryShape::SingleAxisCrossJoin { .. }
+                            | QueryShape::CrossJoinMatrix { .. }
+                            | QueryShape::DimMeasureMatrix { .. }
+                            | QueryShape::TwoHierWithMeasures { .. }
+                            | QueryShape::TwoDimAxes { .. }
+                            | QueryShape::TwoHierDim { .. }
+                            | QueryShape::SingleDim { .. }
+                            | QueryShape::SingleAxisMultiDimCrossJoin { .. } => {
+                                return finish(
+                                    &handlers::execute_fault(
+                                        sid,
+                                        "Format=Tabular is not yet implemented for this MDX query shape",
+                                    )
+                                    .0,
+                                );
+                            }
+                        },
                         Err(e) => return finish(&handlers::execute_fault(sid, &e).0),
                     }
                     match translation.shape {

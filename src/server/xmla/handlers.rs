@@ -2162,6 +2162,29 @@ pub fn execute_query_result(
     execute_xml(session_id, format!("{rowset_body}{metrics_xml}"))
 }
 
+pub fn execute_mdx_tabular_measures_only(
+    session_id: Option<&str>,
+    measures: &[(String, String)],
+    values: &[Option<String>],
+) -> (String, Response) {
+    let fields: Vec<String> = measures
+        .iter()
+        .map(|(name, _)| format!("[Measures].[{name}]"))
+        .collect();
+    let columns: Vec<(&str, Option<&str>)> = fields.iter().map(|f| (f.as_str(), None)).collect();
+    let schema = make_tabular_schema(&columns);
+
+    let mut row = String::from("<row>");
+    for (i, value) in values.iter().enumerate() {
+        if let Some(v) = value {
+            row.push_str(&format!("<C{i}>{}</C{i}>", xml_escape_value(v)));
+        }
+    }
+    row.push_str("</row>");
+
+    execute_xml(session_id, rowset(&schema, &row))
+}
+
 fn xml_escape_value(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
