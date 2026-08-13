@@ -21,13 +21,15 @@ pub fn generate_dax(
         }
     };
 
-    if measure_names.is_empty() {
-        return Err("no measure specified on the axis or in the WHERE clause".to_string());
-    }
-    let mut measure_pairs = Vec::with_capacity(measure_names.len());
-    for name in &measure_names {
-        measure_pairs.push((name.clone(), ctx.resolve_measure(name)?.to_string()));
-    }
+    let measure_pairs: Vec<(String, String)> = if measure_names.is_empty() {
+        vec![("__implicit__".to_string(), "1".to_string())]
+    } else {
+        let mut pairs = Vec::with_capacity(measure_names.len());
+        for name in &measure_names {
+            pairs.push((name.clone(), ctx.resolve_measure(name)?.to_string()));
+        }
+        pairs
+    };
     let measure_cols = measure_pairs
         .iter()
         .enumerate()
