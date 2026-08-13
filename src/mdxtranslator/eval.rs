@@ -100,7 +100,16 @@ impl<'a> EvalCtx<'a> {
                 WithItem::Measure { column, dax, .. } => {
                     measures.insert(column.to_ascii_lowercase(), dax);
                 }
-                WithItem::Member { .. } => {}
+                WithItem::Member { name, expr, .. } => {
+                    if name.is_measure() {
+                        if let (Some(dax), Some(measure_name)) = (
+                            literal_to_dax(&expr),
+                            name.segments.last().map(segment_text),
+                        ) {
+                            measures.insert(measure_name.to_ascii_lowercase(), dax);
+                        }
+                    }
+                }
             }
         }
         Ok(Self {
@@ -180,6 +189,15 @@ fn catalog_measures(engine: &Engine) -> HashMap<String, String> {
         .iter()
         .map(|(name, dax)| (name.to_ascii_lowercase(), dax.clone()))
         .collect()
+}
+
+fn literal_to_dax(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Literal(Literal::Number(n)) if n.fract() == 0.0 => Some((*n as i64).to_string()),
+        Expr::Literal(Literal::Number(n)) => Some(n.to_string()),
+        Expr::Literal(Literal::String { value, .. }) => Some(format!("\"{value}\"")),
+        _ => None,
+    }
 }
 
 pub fn eval_slicer(where_clause: &Expr, ctx: &EvalCtx) -> Result<Vec<Member>, String> {
