@@ -674,7 +674,8 @@ pub fn eval_summarize_columns(
             let mut group_fc = base_fc.clone();
             group_fc.outer_fc = Some(Box::new(fc.clone()));
             group_fc.scoped_columns = all_group_refs.iter().cloned().collect();
-            for ((owning_table, col_name), resolved) in all_group_refs.iter().zip(col_names.iter()) {
+            for ((owning_table, col_name), resolved) in all_group_refs.iter().zip(col_names.iter())
+            {
                 let key_series = result
                     .column(resolved)
                     .expect("resolved columns were successfully selected into result")
