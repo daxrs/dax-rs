@@ -86,7 +86,15 @@ fn make_schema(columns: &[(&str, &str)]) -> String {
     )
 }
 
+/// Matches real Fabric's column naming: `C0`.."C9" under 10 total columns,
+/// zero-padded to the widest index (`C00`.."C10", etc.) at 10 or more.
+fn tabular_col(i: usize, total: usize) -> String {
+    let width = total.saturating_sub(1).to_string().len().max(1);
+    format!("C{i:0width$}")
+}
+
 fn make_tabular_schema(columns: &[(&str, Option<&str>)]) -> String {
+    let total = columns.len();
     let cols: String = columns
         .iter()
         .enumerate()
@@ -95,7 +103,8 @@ fn make_tabular_schema(columns: &[(&str, Option<&str>)]) -> String {
                 Some(t) => format!(r#" type="xsd:{t}""#),
                 None => String::new(),
             };
-            format!(r#"<xsd:element sql:field="{field}" name="C{i}"{type_attr} minOccurs="0"/>"#)
+            let name = tabular_col(i, total);
+            format!(r#"<xsd:element sql:field="{field}" name="{name}"{type_attr} minOccurs="0"/>"#)
         })
         .collect();
     format!(
@@ -2174,10 +2183,12 @@ pub fn execute_mdx_tabular_measures_only(
     let columns: Vec<(&str, Option<&str>)> = fields.iter().map(|f| (f.as_str(), None)).collect();
     let schema = make_tabular_schema(&columns);
 
+    let total = values.len();
     let mut row = String::from("<row>");
     for (i, value) in values.iter().enumerate() {
         if let Some(v) = value {
-            row.push_str(&format!("<C{i}>{}</C{i}>", xml_escape_value(v)));
+            let tag = tabular_col(i, total);
+            row.push_str(&format!("<{tag}>{}</{tag}>", xml_escape_value(v)));
         }
     }
     row.push_str("</row>");
@@ -2217,21 +2228,20 @@ pub fn execute_mdx_tabular_dim_measure(
     let columns: Vec<(&str, Option<&str>)> = fields.iter().map(|(f, t)| (f.as_str(), *t)).collect();
     let schema = make_tabular_schema(&columns);
 
+    let total = columns.len();
     let mut rows_xml = String::new();
     for (key, vals) in cells {
         rows_xml.push_str("<row>");
         let mut col_idx = 0;
         for prop in &dim_props {
+            let tag = tabular_col(col_idx, total);
             match *prop {
                 "MEMBER_UNIQUE_NAME" => {
                     let uname = member_unique_name(&hier_uname, key);
-                    rows_xml.push_str(&format!("<C{col_idx}>{uname}</C{col_idx}>"));
+                    rows_xml.push_str(&format!("<{tag}>{uname}</{tag}>"));
                 }
                 "MEMBER_CAPTION" => {
-                    rows_xml.push_str(&format!(
-                        "<C{col_idx}>{}</C{col_idx}>",
-                        xml_escape_value(key)
-                    ));
+                    rows_xml.push_str(&format!("<{tag}>{}</{tag}>", xml_escape_value(key)));
                 }
                 _ => {}
             }
@@ -2239,7 +2249,86 @@ pub fn execute_mdx_tabular_dim_measure(
         }
         for val in vals {
             if let Some(v) = val {
-                rows_xml.push_str(&format!("<C{col_idx}>{}</C{col_idx}>", xml_escape_value(v)));
+                let tag = tabular_col(col_idx, total);
+                rows_xml.push_str(&format!("<{tag}>{}</{tag}>", xml_escape_value(v)));
+            }
+            col_idx += 1;
+        }
+        rows_xml.push_str("</row>");
+    }
+
+    execute_xml(session_id, rowset(&schema, &rows_xml))
+}
+
+pub fn execute_mdx_tabular_multi_dim_crossjoin(
+    session_id: Option<&str>,
+    dims: &[crate::mdx::AxisPlan],
+    measures: &[(String, String)],
+    cells: &[Vec<Option<String>>],
+) -> (String, Response) {
+    let hier_unames: Vec<String> = dims
+        .iter()
+        .map(|d| format!("[{}].[{}]", d.table, d.hier))
+        .collect();
+    let dim_props: Vec<Vec<&str>> = dims
+        .iter()
+        .map(|d| {
+            d.dim_props
+                .iter()
+                .map(|p| p.as_str())
+                .filter(|p| *p == "MEMBER_UNIQUE_NAME" || *p == "MEMBER_CAPTION")
+                .collect()
+        })
+        .collect();
+    let field_prefixes: Vec<String> = dims
+        .iter()
+        .map(|d| format!("[{}].[{}].[{}]", d.table, d.hier, d.level))
+        .collect();
+
+    let mut fields: Vec<(String, Option<&str>)> = Vec::new();
+    for (i, props) in dim_props.iter().enumerate() {
+        for prop in props {
+            fields.push((format!("{}.[{prop}]", field_prefixes[i]), Some("string")));
+        }
+    }
+    fields.extend(
+        measures
+            .iter()
+            .map(|(name, _)| (format!("[Measures].[{name}]"), None)),
+    );
+
+    let columns: Vec<(&str, Option<&str>)> = fields.iter().map(|(f, t)| (f.as_str(), *t)).collect();
+    let schema = make_tabular_schema(&columns);
+
+    let n_dims = dims.len();
+    let total = columns.len();
+    let mut rows_xml = String::new();
+    for row in cells {
+        rows_xml.push_str("<row>");
+        let mut col_idx = 0;
+        for (i, props) in dim_props.iter().enumerate() {
+            let key = row.get(i).and_then(|v| v.as_ref());
+            for prop in props {
+                if let Some(k) = key {
+                    let tag = tabular_col(col_idx, total);
+                    match *prop {
+                        "MEMBER_UNIQUE_NAME" => {
+                            let uname = member_unique_name(&hier_unames[i], k);
+                            rows_xml.push_str(&format!("<{tag}>{uname}</{tag}>"));
+                        }
+                        "MEMBER_CAPTION" => {
+                            rows_xml.push_str(&format!("<{tag}>{}</{tag}>", xml_escape_value(k)));
+                        }
+                        _ => {}
+                    }
+                }
+                col_idx += 1;
+            }
+        }
+        for m_idx in 0..measures.len() {
+            if let Some(v) = row.get(n_dims + m_idx).and_then(|v| v.as_ref()) {
+                let tag = tabular_col(col_idx, total);
+                rows_xml.push_str(&format!("<{tag}>{}</{tag}>", xml_escape_value(v)));
             }
             col_idx += 1;
         }

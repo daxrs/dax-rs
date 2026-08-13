@@ -414,14 +414,65 @@ async fn xmla_handler(State(state): State<AppState>, headers: HeaderMap, body: B
                                     .0,
                                 );
                             }
+                            QueryShape::SingleAxisMultiDimCrossJoin {
+                                ref dims,
+                                ref measures,
+                                ..
+                            } => {
+                                let n_dims = dims.len();
+                                let n_meas = measures.len();
+                                let cells: Vec<Vec<Option<String>>> = if let Some(ref dax) =
+                                    translation.cell_dax
+                                {
+                                    match d.execute_dax(dax) {
+                                        Ok(results) => results
+                                            .into_iter()
+                                            .next()
+                                            .map(|qr| {
+                                                qr.rows
+                                                    .into_iter()
+                                                    .filter_map(|row| {
+                                                        row.first().and_then(|v| v.as_ref())?;
+                                                        let mut combined: Vec<Option<String>> = (0
+                                                            ..n_dims)
+                                                            .map(|i| {
+                                                                row.get(i).and_then(|v| v.clone())
+                                                            })
+                                                            .collect();
+                                                        combined.extend((0..n_meas).map(|i| {
+                                                            row.get(n_dims + i)
+                                                                .and_then(|v| v.clone())
+                                                        }));
+                                                        Some(combined)
+                                                    })
+                                                    .collect()
+                                            })
+                                            .unwrap_or_default(),
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                error = %e,
+                                                "MDX tabular multi-dim crossjoin failed"
+                                            );
+                                            vec![]
+                                        }
+                                    }
+                                } else {
+                                    vec![]
+                                };
+                                return finish(
+                                    &handlers::execute_mdx_tabular_multi_dim_crossjoin(
+                                        sid, dims, measures, &cells,
+                                    )
+                                    .0,
+                                );
+                            }
                             QueryShape::Scalar { .. }
                             | QueryShape::SingleAxisCrossJoin { .. }
                             | QueryShape::CrossJoinMatrix { .. }
                             | QueryShape::TwoHierWithMeasures { .. }
                             | QueryShape::TwoDimAxes { .. }
                             | QueryShape::TwoHierDim { .. }
-                            | QueryShape::SingleDim { .. }
-                            | QueryShape::SingleAxisMultiDimCrossJoin { .. } => {
+                            | QueryShape::SingleDim { .. } => {
                                 return finish(
                                     &handlers::execute_fault(
                                         sid,
