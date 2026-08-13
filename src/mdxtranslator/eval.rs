@@ -395,6 +395,14 @@ fn eval_crossjoin(args: &[Option<Expr>], ctx: &EvalCtx) -> Result<EvaluatedSet, 
     };
     let left = eval_set(l, ctx)?;
     let right = eval_set(r, ctx)?;
+    Ok(combine_sets(left, right))
+}
+
+/// Shape-concat + Cartesian product of two already-evaluated sets — the same
+/// combination `CrossJoin` performs on two unevaluated expressions, exposed
+/// standalone so multiple MDX axes can be folded into one combined tuple
+/// space before DAX generation.
+pub fn combine_sets(left: EvaluatedSet, right: EvaluatedSet) -> EvaluatedSet {
     let mut shape = left.shape;
     shape.extend(right.shape);
     let mut tuples = Vec::with_capacity(left.tuples.len() * right.tuples.len());
@@ -405,7 +413,7 @@ fn eval_crossjoin(args: &[Option<Expr>], ctx: &EvalCtx) -> Result<EvaluatedSet, 
             tuples.push(Tuple { members });
         }
     }
-    Ok(EvaluatedSet { shape, tuples })
+    EvaluatedSet { shape, tuples }
 }
 
 fn eval_hierarchize(args: &[Option<Expr>], ctx: &EvalCtx) -> Result<EvaluatedSet, String> {

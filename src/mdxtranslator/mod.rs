@@ -23,6 +23,40 @@ pub fn parse_mdx(input: &str) -> Result<Pairs<'_, Rule>, Box<pest::error::Error<
     MdxParser::parse(Rule::mdx_query, input).map_err(Box::new)
 }
 
+/// Parses `mdx`, evaluates every axis and the WHERE slicer, and generates the
+/// DAX query text for the result. Multiple axes are folded into one combined
+/// tuple space (the same shape-concat + Cartesian product `CrossJoin`
+/// performs) before generation, since `daxgen` only cares about the final
+/// combined shape, not which MDX axis each hierarchy came from.
+pub fn translate(mdx: &str, engine: &crate::engine::Engine) -> Result<String, String> {
+    let query = ast::parse(mdx).map_err(|e| e.to_string())?;
+    let ctx = eval::EvalCtx::from_query(engine, &query).map_err(|e| e.to_string())?;
+    let cube = match query.body {
+        ast::QueryBody::Cube(cube) => cube,
+        ast::QueryBody::System(_) => {
+            return Err(
+                "$system discovery queries are not supported by the DAX translator".to_string(),
+            )
+        }
+    };
+
+    let mut combined: Option<eval::EvaluatedSet> = None;
+    for axis in &cube.axes {
+        let set = eval::eval_set(&axis.expr, &ctx)?;
+        combined = Some(match combined {
+            None => set,
+            Some(acc) => eval::combine_sets(acc, set),
+        });
+    }
+
+    let slicer = match &cube.where_clause {
+        Some(w) => eval::eval_slicer(w, &ctx)?,
+        None => Vec::new(),
+    };
+
+    daxgen::generate_dax(combined.as_ref(), &slicer, &ctx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
