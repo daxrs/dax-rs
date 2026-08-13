@@ -613,11 +613,7 @@ impl Evaluator {
                 BinaryOperator::Add => Ok(Value::Integer(a + b)),
                 BinaryOperator::Sub => Ok(Value::Integer(a - b)),
                 BinaryOperator::Mul => Ok(Value::Integer(a * b)),
-                BinaryOperator::Div => Ok(if b == 0 {
-                    Value::Blank
-                } else {
-                    Value::Number(a as f64 / b as f64)
-                }),
+                BinaryOperator::Div => Ok(Value::Number(a as f64 / b as f64)),
                 BinaryOperator::Eq => Ok(Value::Boolean(a == b)),
                 BinaryOperator::Neq => Ok(Value::Boolean(a != b)),
                 BinaryOperator::Gt => Ok(Value::Boolean(a > b)),
@@ -649,11 +645,7 @@ impl Evaluator {
                 BinaryOperator::Add => Ok(Value::Number(a + b)),
                 BinaryOperator::Sub => Ok(Value::Number(a - b)),
                 BinaryOperator::Mul => Ok(Value::Number(a * b)),
-                BinaryOperator::Div => Ok(if b == 0.0 {
-                    Value::Blank
-                } else {
-                    Value::Number(a / b)
-                }),
+                BinaryOperator::Div => Ok(Value::Number(a / b)),
                 BinaryOperator::Eq => Ok(Value::Boolean(a == b)),
                 BinaryOperator::Neq => Ok(Value::Boolean(a != b)),
                 BinaryOperator::Gt => Ok(Value::Boolean(a > b)),
@@ -894,6 +886,16 @@ impl Evaluator {
                 }
             }
 
+            (Value::Blank, Value::Integer(_) | Value::Number(_))
+                if matches!(op, BinaryOperator::Mul | BinaryOperator::Div) =>
+            {
+                Ok(Value::Blank)
+            }
+            (Value::Integer(_) | Value::Number(_), Value::Blank)
+                if matches!(op, BinaryOperator::Mul) =>
+            {
+                Ok(Value::Blank)
+            }
             (Value::Blank, Value::Integer(b)) => {
                 Self::eval_binary(Value::Integer(0), Value::Integer(b), op)
             }
