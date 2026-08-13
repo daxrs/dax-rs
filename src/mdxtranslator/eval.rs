@@ -75,6 +75,7 @@ pub struct EvalCtx<'a> {
     pub named: HashMap<String, Expr>,
     pub measures: HashMap<String, String>,
     cache: RefCell<HashMap<(String, String), Vec<Member>>>,
+    filtered_cache: RefCell<HashMap<(String, String, String, String), Vec<Member>>>,
 }
 
 impl<'a> EvalCtx<'a> {
@@ -84,6 +85,7 @@ impl<'a> EvalCtx<'a> {
             named: HashMap::new(),
             measures: catalog_measures(engine),
             cache: RefCell::new(HashMap::new()),
+            filtered_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -111,6 +113,7 @@ impl<'a> EvalCtx<'a> {
             named,
             measures,
             cache: RefCell::new(HashMap::new()),
+            filtered_cache: RefCell::new(HashMap::new()),
         })
     }
 
@@ -133,6 +136,37 @@ impl<'a> EvalCtx<'a> {
             .ok_or_else(|| "no result for VALUES query".to_string())?;
         let leaves = table_value_to_leaves(value, table, hier)?;
         self.cache.borrow_mut().insert(key, leaves.clone());
+        Ok(leaves)
+    }
+
+    fn resolve_all_members_filtered(
+        &self,
+        table: &str,
+        hier: &str,
+        filter_hier: &str,
+        filter_key: &str,
+    ) -> Result<Vec<Member>, String> {
+        let key = (
+            table.to_string(),
+            hier.to_string(),
+            filter_hier.to_string(),
+            filter_key.to_string(),
+        );
+        if let Some(cached) = self.filtered_cache.borrow().get(&key) {
+            return Ok(cached.clone());
+        }
+        let filter = if filter_key.is_empty() {
+            format!("FILTER(ALL('{table}'[{filter_hier}]), ISBLANK('{table}'[{filter_hier}]))")
+        } else {
+            format!("'{table}'[{filter_hier}] = \"{filter_key}\"")
+        };
+        let dax = format!("EVALUATE CALCULATETABLE(VALUES('{table}'[{hier}]), {filter})");
+        let mut results = self.engine.evaluate_query(&dax).map_err(|e| e.to_string())?;
+        let value = results
+            .pop()
+            .ok_or_else(|| "no result for filtered VALUES query".to_string())?;
+        let leaves = table_value_to_leaves(value, table, hier)?;
+        self.filtered_cache.borrow_mut().insert(key, leaves.clone());
         Ok(leaves)
     }
 }
@@ -357,6 +391,7 @@ fn eval_function_call(name: &str, args: &[Option<Expr>], ctx: &EvalCtx) -> Resul
         "crossjoin" => eval_crossjoin(args, ctx),
         "hierarchize" => eval_hierarchize(args, ctx),
         "drilldownlevel" => eval_drilldown_level(args, ctx),
+        "drilldownmember" => eval_drilldown_member(args, ctx),
         "addcalculatedmembers" => eval_add_calculated_members(args, ctx),
         other => Err(format!("unsupported function in set position: {other}")),
     }
@@ -413,6 +448,85 @@ fn eval_drilldown_level(args: &[Option<Expr>], ctx: &EvalCtx) -> Result<Evaluate
             members: vec![leaf],
         });
     }
+    Ok(EvaluatedSet {
+        shape: base.shape,
+        tuples,
+    })
+}
+
+fn eval_drilldown_member(args: &[Option<Expr>], ctx: &EvalCtx) -> Result<EvaluatedSet, String> {
+    let [Some(base_expr), Some(members_expr), Some(hier_expr)] = args else {
+        return Err("DrilldownMember requires three arguments".to_string());
+    };
+    let base = eval_set(base_expr, ctx)?;
+    let drill_targets = eval_set(members_expr, ctx)?;
+    let [drill_href] = drill_targets.shape.as_slice() else {
+        return Err("DrilldownMember's second argument must be a single-hierarchy set".to_string());
+    };
+    let HierarchyRef::Dimension {
+        table: drill_table,
+        hier: drill_hier,
+    } = drill_href
+    else {
+        return Err("DrilldownMember cannot drill on the Measures hierarchy".to_string());
+    };
+    let drill_pos = base
+        .shape
+        .iter()
+        .position(|h| h == drill_href)
+        .ok_or_else(|| "DrilldownMember: base set does not contain the drilled hierarchy".to_string())?;
+
+    let Expr::Member(target_path) = hier_expr else {
+        return Err("DrilldownMember's third argument must be a hierarchy reference".to_string());
+    };
+    let (target_table, target_hier) = table_hier_of(target_path)?;
+    let target_href = HierarchyRef::Dimension {
+        table: target_table.clone(),
+        hier: target_hier.clone(),
+    };
+    let target_pos = base
+        .shape
+        .iter()
+        .position(|h| *h == target_href)
+        .ok_or_else(|| "DrilldownMember: base set does not contain the target hierarchy".to_string())?;
+    if target_table != *drill_table {
+        return Err(
+            "DrilldownMember across hierarchies on different tables is not yet supported".to_string(),
+        );
+    }
+
+    let drillable_keys: std::collections::HashSet<String> = drill_targets
+        .tuples
+        .iter()
+        .filter_map(|t| match &t.members[0] {
+            Member::Leaf { key, .. } => Some(key.clone()),
+            Member::All { .. } | Member::Measure { .. } => None,
+        })
+        .collect();
+
+    let mut tuples = Vec::with_capacity(base.tuples.len());
+    for t in base.tuples {
+        let drill_key = match &t.members[drill_pos] {
+            Member::Leaf { key, .. } => {
+                if drillable_keys.contains(key) {
+                    Some(key.clone())
+                } else {
+                    None
+                }
+            }
+            Member::All { .. } | Member::Measure { .. } => None,
+        };
+        tuples.push(t.clone());
+        if let Some(key) = drill_key {
+            let filtered = ctx.resolve_all_members_filtered(&target_table, &target_hier, drill_hier, &key)?;
+            for leaf in filtered {
+                let mut members = t.members.clone();
+                members[target_pos] = leaf;
+                tuples.push(Tuple { members });
+            }
+        }
+    }
+
     Ok(EvaluatedSet {
         shape: base.shape,
         tuples,
