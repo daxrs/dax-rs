@@ -1,0 +1,202 @@
+// A general-purpose MDX grammar: unlike dax-rs/src/mdx/mdx.pest (which has one
+// pest rule per known function), this grammar parses the actual shape of MDX —
+// a single mutually-recursive expression grammar shared by numeric, string,
+// member, tuple and set expressions, plus a generic function-call rule that
+// accepts ANY function name. Which functions/properties dax-rs can actually
+// translate is a semantic-layer concern resolved after parsing, not a parse
+// -time restriction.
+
+WHITESPACE = _{ " " | "\t" | "\n" | "\r" }
+COMMENT    = _{ "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
+
+// ── top level ─────────────────────────────────────────────────────────────────
+
+mdx_query   = { SOI ~ select_stmt ~ EOI }
+select_stmt = { with_clause? ~ kw_select ~ (cube_select | system_select) }
+
+// ── with clause ────────────────────────────────────────────────────────────────
+// WITH MEMBER / WITH SET are genuine MDX and get the full expression grammar.
+// WITH MEASURE is a Fabric/Power BI/Excel extension whose body is a DAX
+// formula, not MDX — it is captured as opaque text rather than parsed.
+
+with_clause = { kw_with ~ with_item+ }
+with_item   = { measure_def | member_def | set_def }
+
+measure_def      = { kw_measure ~ quoted_table_ref ~ "=" ~ dax_passthrough }
+quoted_table_ref  = { string_literal ~ bracketed_ident }
+dax_passthrough   = @{ (!with_item_kw ~ ANY)+ }
+with_item_kw      = _{ (^"MEASURE" | ^"MEMBER" | ^"SET" | ^"SELECT") ~ !(ASCII_ALPHANUMERIC | "_") }
+
+member_def   = { kw_member ~ member_name ~ kw_as ~ expr ~ member_extra* }
+member_extra = { "," ~ (solve_order | member_prop) }
+solve_order  = { ^"SOLVE_ORDER" ~ "=" ~ integer_literal }
+member_prop  = { plain_ident ~ "=" ~ expr }
+
+set_def = { kw_set ~ member_name ~ kw_as ~ expr }
+
+// Unlike a member reference used inside an expression (where a trailing bare
+// word must be left for postfix_expr's dot_suffix chain), a calculated
+// member/set name being *defined* is immediately followed by AS, so trailing
+// bare-word segments (e.g. `[Measures].cChildren`) can be consumed directly.
+member_name = { compound_name ~ ("." ~ plain_ident)* }
+
+// ── $system (schema) query ────────────────────────────────────────────────────
+// A separate, much smaller sub-language used only for MDSCHEMA/DISCOVER-style
+// probing queries — not part of "real" MDX expression evaluation.
+
+system_select = { col_list ~ kw_from ~ system_from ~ (kw_where ~ cond_list)? }
+system_from   = @{ ^"$system." ~ plain_ident }
+col_list      = { bracketed_ident ~ ("," ~ bracketed_ident)* }
+cond_list     = { condition ~ (kw_and ~ condition)* }
+condition     = { cond_ne | cond_eq | cond_bool }
+cond_eq       = { bracketed_ident ~ "=" ~ cond_value }
+cond_ne       = { bracketed_ident ~ "<>" ~ cond_value }
+cond_bool     = { bracketed_ident }
+cond_value    = { param_ref | string_literal | integer_literal }
+param_ref     = { "@" ~ plain_ident }
+
+// ── cube query ────────────────────────────────────────────────────────────────
+
+cube_select = {
+    (axis_clause ~ ("," ~ axis_clause)*)?
+    ~ kw_from ~ cube_from
+    ~ (kw_where ~ expr)?
+    ~ (kw_cell ~ kw_properties ~ prop_list)?
+}
+
+cube_from = { bracketed_ident | subquery }
+subquery  = { "(" ~ kw_select ~ subq_axis ~ ("," ~ subq_axis)* ~ kw_from ~ bracketed_ident ~ (kw_where ~ expr)? ~ ")" }
+subq_axis = { expr ~ (kw_dimension ~ kw_properties ~ prop_list)? ~ kw_on ~ axis_id }
+
+axis_clause = {
+    kw_non_empty?
+    ~ expr
+    ~ (kw_dimension ~ kw_properties ~ prop_list)?
+    ~ kw_on ~ axis_id
+}
+
+axis_id = { kw_columns | kw_rows | kw_pages | kw_chapters | kw_sections | integer_literal }
+
+// ── unified expression grammar ──────────────────────────────────────────────
+// Numeric / string / boolean / member / tuple / set expressions all share one
+// grammar, exactly as in real MDX. Type is resolved later against catalog
+// metadata, not at parse time — e.g. a "set expression" is just whatever
+// `expr` an axis or WHERE clause happens to contain.
+
+expr         = { or_expr }
+or_expr      = { and_expr ~ (kw_or ~ and_expr)* }
+and_expr     = { not_expr ~ (kw_and ~ not_expr)* }
+// `kw_not` itself is silent, so its presence can't be read back from a plain
+// `kw_not?` — a wrapper rule (`negated_expr`/`negated_is_tail`) is needed so
+// downstream code can tell `x` apart from `NOT x`.
+not_expr     = { negated_expr | compare_expr }
+negated_expr = { kw_not ~ compare_expr }
+compare_expr = { concat_expr ~ (is_tail | (compare_op ~ concat_expr))? }
+compare_op   = { "<>" | "<=" | ">=" | "=" | "<" | ">" }
+// Member-identity comparison, distinct from `=` (value equality):
+// `expr IS expr`, `expr IS NULL`, `expr IS NOT expr`, `expr IS NOT NULL`.
+is_tail         = { kw_is ~ (negated_is_tail | kw_null | concat_expr) }
+negated_is_tail = { kw_not ~ (kw_null | concat_expr) }
+concat_expr  = { add_expr ~ ("||" ~ add_expr)* }
+add_expr     = { range_expr ~ (add_op ~ range_expr)* }
+add_op       = { "+" | "-" }
+// The range operator: `[Time].[Jan] : [Time].[Jun]` — the set of members
+// between two members (inclusive) on the same level.
+range_expr   = { mul_expr ~ (":" ~ mul_expr)? }
+mul_expr     = { unary_expr ~ (mul_op ~ unary_expr)* }
+mul_op       = { "*" | "/" }
+unary_expr   = { "-" ~ unary_expr | postfix_expr }
+
+// Generalizes .Parent / .PrevMember / .Lag(2) / .Item(0) / .Properties("X") /
+// .MEMBERS / .AllMembers / .Children / .CurrentMember etc. into one rule
+// instead of a fixed traversal enum — any dotted suffix is accepted here.
+postfix_expr    = { primary ~ ("." ~ dot_suffix)* }
+dot_suffix      = { function_call | bracketed_prop | plain_ident }
+bracketed_prop  = @{ "[" ~ (!"]" ~ ANY)+ ~ "]" }
+
+// `literal` is tried before `member_ref` so that keyword literals like NULL
+// (which are also lexically valid bare identifiers) aren't swallowed as a
+// member reference — kw_null's word-boundary check means this reordering
+// doesn't affect ordinary identifiers.
+primary = { case_expr | function_call | tuple_expr | set_literal | literal | member_ref }
+
+// Generic function call: ANY identifier followed by "(" is a function call.
+// Replaces the old grammar's per-function rules (func_crossjoin, func_
+// hierarchize, func_drilldown_level, ...) with one rule that covers every
+// MDX function, known or not. Positional args may be omitted (e.g.
+// DrilldownLevel(set,,,INCLUDE_CALC_MEMBERS)) so each arg slot is optional.
+function_call = { func_name ~ "(" ~ arg_list? ~ ")" }
+func_name     = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+arg_list      = { arg ~ ("," ~ arg)* }
+arg           = { expr? }
+
+// A single parenthesised expression is a 1-tuple/grouping; two or more
+// comma-separated expressions are an explicit N-member tuple. Both forms
+// share this rule — disambiguated later, exactly as in real MDX.
+tuple_expr  = { "(" ~ expr ~ ("," ~ expr)* ~ ")" }
+set_literal = { "{" ~ (expr ~ ("," ~ expr)*)? ~ "}" }
+
+case_expr   = { kw_case ~ (!kw_when ~ expr)? ~ when_clause+ ~ else_clause? ~ kw_end }
+when_clause = { kw_when ~ expr ~ kw_then ~ expr }
+else_clause = { kw_else ~ expr }
+
+member_ref    = { compound_name }
+// First segment may be bracketed or bare (e.g. `Measures.[Sales Amount]`);
+// later segments must be bracketed or a `&[key]`/bare-`&` key reference, so
+// that trailing dot-suffixes like `.AllMembers` or `.Lag(2)` are left for
+// postfix_expr's dot_suffix chain instead of being swallowed here.
+compound_name = { (bracketed_ident | plain_ident) ~ ("." ~ compound_tail)* }
+compound_tail = { key_ref | bracketed_ident }
+// A bare `&` with no bracketed key (as in `[Product].[Color].&`) denotes the
+// member whose key is the empty string — observed in real captures.
+key_ref       = { "&" ~ bracketed_ident? }
+
+literal           = { string_literal | dq_string_literal | kw_null | number_literal }
+number_literal    = @{ "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
+// A doubled quote (`""` / `''`) is the escaped-quote convention shared with SQL.
+dq_string_literal = @{ "\"" ~ (("\"\"") | (!"\"" ~ ANY))* ~ "\"" }
+
+// ── property lists ────────────────────────────────────────────────────────────
+prop_list = { prop_name ~ ("," ~ prop_name)* }
+prop_name = @{ "[" ~ (ASCII_ALPHANUMERIC | "_")+ ~ "]" | (ASCII_ALPHANUMERIC | "_")+ }
+
+// ── shared terminals ──────────────────────────────────────────────────────────
+plain_ident     = @{ (ASCII_ALPHANUMERIC | "_")+ }
+bracketed_ident = @{ "[" ~ (!"]" ~ ANY)+ ~ "]" }
+string_literal  = @{ "'" ~ (("''") | (!"'" ~ ANY))* ~ "'" }
+integer_literal = @{ ASCII_DIGIT+ }
+
+// ── keywords (silent — do not appear in the parse tree unless noted) ─────────
+
+kw_select     = _{ ^"SELECT" }
+kw_from       = _{ ^"FROM" }
+kw_where      = _{ ^"WHERE" }
+kw_and        = _{ ^"AND" }
+kw_or         = _{ ^"OR" }
+kw_not        = _{ ^"NOT" }
+kw_on         = _{ ^"ON" }
+kw_cell       = _{ ^"CELL" }
+kw_properties = _{ ^"PROPERTIES" }
+kw_dimension  = _{ ^"DIMENSION" }
+kw_with       = _{ ^"WITH" }
+kw_measure    = _{ ^"MEASURE" }
+kw_member     = _{ ^"MEMBER" }
+kw_set        = _{ ^"SET" }
+kw_as         = _{ ^"AS" }
+kw_case       = _{ ^"CASE" }
+kw_when       = _{ ^"WHEN" }
+kw_then       = _{ ^"THEN" }
+kw_else       = _{ ^"ELSE" }
+kw_end        = _{ ^"END" }
+kw_is         = _{ ^"IS" }
+
+// Non-silent: NULL is a literal value, not just a keyword.
+kw_null = @{ ^"NULL" ~ !(ASCII_ALPHANUMERIC | "_") }
+
+// Non-silent: appear in the parse tree for axis_id dispatch.
+kw_non_empty = ${ ^"NON" ~ WHITESPACE+ ~ ^"EMPTY" }
+kw_columns   = { ^"COLUMNS" }
+kw_rows      = { ^"ROWS" }
+kw_pages     = { ^"PAGES" }
+kw_chapters  = { ^"CHAPTERS" }
+kw_sections  = { ^"SECTIONS" }
