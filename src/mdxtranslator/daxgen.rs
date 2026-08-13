@@ -94,7 +94,9 @@ fn distinct_measure_names(set: &EvaluatedSet, measure_position: usize) -> Vec<St
         .iter()
         .map(|t| match &t.members[measure_position] {
             Member::Measure { name } => name.clone(),
-            other => unreachable!("expected Member::Measure at the Measures position, got {other:?}"),
+            other => {
+                unreachable!("expected Member::Measure at the Measures position, got {other:?}")
+            }
         })
         .collect();
     names.sort();
@@ -116,9 +118,7 @@ fn slicer_filters(slicer: &[Member]) -> Vec<String> {
     slicer
         .iter()
         .filter_map(|m| match m {
-            Member::Leaf {
-                table, hier, key, ..
-            } => Some(format!("'{table}'[{hier}] = \"{key}\"")),
+            Member::Leaf { table, hier, key, .. } => Some(format!("'{table}'[{hier}] = \"{key}\"")),
             Member::All { .. } | Member::Measure { .. } => None,
         })
         .collect()

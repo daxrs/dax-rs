@@ -4,33 +4,28 @@ use crate::engine::Engine;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-pub fn normalize_with_item(item: WithItem) -> Result<WithItem, Box<pest::error::Error<super::Rule>>> {
+pub fn normalize_with_item(
+    item: WithItem,
+) -> Result<WithItem, Box<pest::error::Error<super::Rule>>> {
     match item {
-        WithItem::Member {
-            name,
-            expr,
-            solve_order,
-            props,
-        } => Ok(WithItem::Member {
+        WithItem::Member { name, expr, solve_order, props } => Ok(WithItem::Member {
             name,
             expr: reparse_if_single_quoted(expr)?,
             solve_order,
             props,
         }),
-        WithItem::Set { name, expr } => Ok(WithItem::Set {
-            name,
-            expr: reparse_if_single_quoted(expr)?,
-        }),
+        WithItem::Set { name, expr } => {
+            Ok(WithItem::Set { name, expr: reparse_if_single_quoted(expr)? })
+        }
         WithItem::Measure { .. } => Ok(item),
     }
 }
 
 fn reparse_if_single_quoted(expr: Expr) -> Result<Expr, Box<pest::error::Error<super::Rule>>> {
     match &expr {
-        Expr::Literal(Literal::String {
-            value,
-            quote: QuoteStyle::Single,
-        }) => ast::parse_expr(value),
+        Expr::Literal(Literal::String { value, quote: QuoteStyle::Single }) => {
+            ast::parse_expr(value)
+        }
         _ => Ok(expr),
     }
 }
@@ -130,7 +125,10 @@ impl<'a> EvalCtx<'a> {
             return Ok(cached.clone());
         }
         let dax = format!("EVALUATE VALUES('{table}'[{hier}])");
-        let mut results = self.engine.evaluate_query(&dax).map_err(|e| e.to_string())?;
+        let mut results = self
+            .engine
+            .evaluate_query(&dax)
+            .map_err(|e| e.to_string())?;
         let value = results
             .pop()
             .ok_or_else(|| "no result for VALUES query".to_string())?;
@@ -161,7 +159,10 @@ impl<'a> EvalCtx<'a> {
             format!("'{table}'[{filter_hier}] = \"{filter_key}\"")
         };
         let dax = format!("EVALUATE CALCULATETABLE(VALUES('{table}'[{hier}]), {filter})");
-        let mut results = self.engine.evaluate_query(&dax).map_err(|e| e.to_string())?;
+        let mut results = self
+            .engine
+            .evaluate_query(&dax)
+            .map_err(|e| e.to_string())?;
         let value = results
             .pop()
             .ok_or_else(|| "no result for filtered VALUES query".to_string())?;
@@ -270,14 +271,12 @@ fn table_hier_of(path: &MemberPath) -> Result<(String, String), String> {
 
 fn hierarchy_ref_of(member: &Member) -> HierarchyRef {
     match member {
-        Member::Leaf { table, hier, .. } => HierarchyRef::Dimension {
-            table: table.clone(),
-            hier: hier.clone(),
-        },
-        Member::All { table, hier } => HierarchyRef::Dimension {
-            table: table.clone(),
-            hier: hier.clone(),
-        },
+        Member::Leaf { table, hier, .. } => {
+            HierarchyRef::Dimension { table: table.clone(), hier: hier.clone() }
+        }
+        Member::All { table, hier } => {
+            HierarchyRef::Dimension { table: table.clone(), hier: hier.clone() }
+        }
         Member::Measure { .. } => HierarchyRef::Measures,
     }
 }
@@ -332,10 +331,7 @@ pub fn eval_set(expr: &Expr, ctx: &EvalCtx) -> Result<EvaluatedSet, String> {
                 }
                 tuples.extend(sub.tuples);
             }
-            Ok(EvaluatedSet {
-                shape: shape.unwrap_or_default(),
-                tuples,
-            })
+            Ok(EvaluatedSet { shape: shape.unwrap_or_default(), tuples })
         }
         Expr::Tuple(items) => {
             let mut shape = Vec::with_capacity(items.len());
@@ -345,10 +341,7 @@ pub fn eval_set(expr: &Expr, ctx: &EvalCtx) -> Result<EvaluatedSet, String> {
                 shape.push(hierarchy_ref_of(&m));
                 members.push(m);
             }
-            Ok(EvaluatedSet {
-                shape,
-                tuples: vec![Tuple { members }],
-            })
+            Ok(EvaluatedSet { shape, tuples: vec![Tuple { members }] })
         }
         Expr::FunctionCall { name, args } => eval_function_call(name, args, ctx),
         Expr::MemberFunction { base, name, args } => {
@@ -378,15 +371,14 @@ fn eval_member_expr_as_set(path: &MemberPath, ctx: &EvalCtx) -> Result<Evaluated
     }
     let member = classify_member_path(path)?;
     let shape = vec![hierarchy_ref_of(&member)];
-    Ok(EvaluatedSet {
-        shape,
-        tuples: vec![Tuple {
-            members: vec![member],
-        }],
-    })
+    Ok(EvaluatedSet { shape, tuples: vec![Tuple { members: vec![member] }] })
 }
 
-fn eval_function_call(name: &str, args: &[Option<Expr>], ctx: &EvalCtx) -> Result<EvaluatedSet, String> {
+fn eval_function_call(
+    name: &str,
+    args: &[Option<Expr>],
+    ctx: &EvalCtx,
+) -> Result<EvaluatedSet, String> {
     match name.to_ascii_lowercase().as_str() {
         "crossjoin" => eval_crossjoin(args, ctx),
         "hierarchize" => eval_hierarchize(args, ctx),
@@ -423,7 +415,10 @@ fn eval_hierarchize(args: &[Option<Expr>], ctx: &EvalCtx) -> Result<EvaluatedSet
     eval_set(inner, ctx)
 }
 
-fn eval_add_calculated_members(args: &[Option<Expr>], ctx: &EvalCtx) -> Result<EvaluatedSet, String> {
+fn eval_add_calculated_members(
+    args: &[Option<Expr>],
+    ctx: &EvalCtx,
+) -> Result<EvaluatedSet, String> {
     let [Some(inner)] = args else {
         return Err("AddCalculatedMembers requires one argument".to_string());
     };
@@ -444,14 +439,9 @@ fn eval_drilldown_level(args: &[Option<Expr>], ctx: &EvalCtx) -> Result<Evaluate
     let leaves = ctx.resolve_all_members(table, hier)?;
     let mut tuples = base.tuples;
     for leaf in leaves {
-        tuples.push(Tuple {
-            members: vec![leaf],
-        });
+        tuples.push(Tuple { members: vec![leaf] });
     }
-    Ok(EvaluatedSet {
-        shape: base.shape,
-        tuples,
-    })
+    Ok(EvaluatedSet { shape: base.shape, tuples })
 }
 
 fn eval_drilldown_member(args: &[Option<Expr>], ctx: &EvalCtx) -> Result<EvaluatedSet, String> {
@@ -463,35 +453,34 @@ fn eval_drilldown_member(args: &[Option<Expr>], ctx: &EvalCtx) -> Result<Evaluat
     let [drill_href] = drill_targets.shape.as_slice() else {
         return Err("DrilldownMember's second argument must be a single-hierarchy set".to_string());
     };
-    let HierarchyRef::Dimension {
-        table: drill_table,
-        hier: drill_hier,
-    } = drill_href
-    else {
+    let HierarchyRef::Dimension { table: drill_table, hier: drill_hier } = drill_href else {
         return Err("DrilldownMember cannot drill on the Measures hierarchy".to_string());
     };
     let drill_pos = base
         .shape
         .iter()
         .position(|h| h == drill_href)
-        .ok_or_else(|| "DrilldownMember: base set does not contain the drilled hierarchy".to_string())?;
+        .ok_or_else(|| {
+            "DrilldownMember: base set does not contain the drilled hierarchy".to_string()
+        })?;
 
     let Expr::Member(target_path) = hier_expr else {
         return Err("DrilldownMember's third argument must be a hierarchy reference".to_string());
     };
     let (target_table, target_hier) = table_hier_of(target_path)?;
-    let target_href = HierarchyRef::Dimension {
-        table: target_table.clone(),
-        hier: target_hier.clone(),
-    };
+    let target_href =
+        HierarchyRef::Dimension { table: target_table.clone(), hier: target_hier.clone() };
     let target_pos = base
         .shape
         .iter()
         .position(|h| *h == target_href)
-        .ok_or_else(|| "DrilldownMember: base set does not contain the target hierarchy".to_string())?;
+        .ok_or_else(|| {
+            "DrilldownMember: base set does not contain the target hierarchy".to_string()
+        })?;
     if target_table != *drill_table {
         return Err(
-            "DrilldownMember across hierarchies on different tables is not yet supported".to_string(),
+            "DrilldownMember across hierarchies on different tables is not yet supported"
+                .to_string(),
         );
     }
 
@@ -518,7 +507,8 @@ fn eval_drilldown_member(args: &[Option<Expr>], ctx: &EvalCtx) -> Result<Evaluat
         };
         tuples.push(t.clone());
         if let Some(key) = drill_key {
-            let filtered = ctx.resolve_all_members_filtered(&target_table, &target_hier, drill_hier, &key)?;
+            let filtered =
+                ctx.resolve_all_members_filtered(&target_table, &target_hier, drill_hier, &key)?;
             for leaf in filtered {
                 let mut members = t.members.clone();
                 members[target_pos] = leaf;
@@ -527,10 +517,7 @@ fn eval_drilldown_member(args: &[Option<Expr>], ctx: &EvalCtx) -> Result<Evaluat
         }
     }
 
-    Ok(EvaluatedSet {
-        shape: base.shape,
-        tuples,
-    })
+    Ok(EvaluatedSet { shape: base.shape, tuples })
 }
 
 fn eval_member_function_as_set(
@@ -557,9 +544,7 @@ fn eval_member_function_as_set(
                         table: table.clone(),
                         hier: hier.clone(),
                     }],
-                    tuples: vec![Tuple {
-                        members: vec![Member::All { table, hier }],
-                    }],
+                    tuples: vec![Tuple { members: vec![Member::All { table, hier }] }],
                 }),
                 Member::Leaf { .. } => {
                     let (table, hier) = table_hier_of(path)?;
@@ -582,7 +567,9 @@ fn eval_member_function_as_set(
             };
             all_members_set(ctx, table, hier)
         }
-        other => Err(format!("unsupported member function in set position: .{other}")),
+        other => Err(format!(
+            "unsupported member function in set position: .{other}"
+        )),
     }
 }
 
@@ -661,10 +648,7 @@ mod tests {
             WithItem::Member { expr, .. } => {
                 assert!(matches!(
                     expr,
-                    Expr::Literal(Literal::String {
-                        quote: QuoteStyle::Double,
-                        ..
-                    })
+                    Expr::Literal(Literal::String { quote: QuoteStyle::Double, .. })
                 ));
             }
             other => panic!("expected WithItem::Member, got {other:?}"),

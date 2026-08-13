@@ -299,12 +299,7 @@ fn build_member_def(pair: Pair<Rule>) -> WithItem {
             r => unreachable!("unexpected member_extra rule {r:?}"),
         }
     }
-    WithItem::Member {
-        name,
-        expr,
-        solve_order,
-        props,
-    }
+    WithItem::Member { name, expr, solve_order, props }
 }
 
 fn build_set_def(pair: Pair<Rule>) -> WithItem {
@@ -372,11 +367,7 @@ fn build_system_select(pair: Pair<Rule>) -> SystemQuery {
         Some(cond_list) => cond_list.into_inner().map(build_condition).collect(),
         None => Vec::new(),
     };
-    SystemQuery {
-        columns,
-        table,
-        conditions,
-    }
+    SystemQuery { columns, table, conditions }
 }
 
 fn build_condition(pair: Pair<Rule>) -> Condition {
@@ -386,30 +377,17 @@ fn build_condition(pair: Pair<Rule>) -> Condition {
             let mut p = inner.into_inner();
             let column = strip_bracketed(p.next().expect("bracketed_ident").as_str());
             let value = build_cond_value(p.next().expect("cond_value"));
-            Condition {
-                column,
-                op: ConditionOp::Eq,
-                value,
-            }
+            Condition { column, op: ConditionOp::Eq, value }
         }
         Rule::cond_ne => {
             let mut p = inner.into_inner();
             let column = strip_bracketed(p.next().expect("bracketed_ident").as_str());
             let value = build_cond_value(p.next().expect("cond_value"));
-            Condition {
-                column,
-                op: ConditionOp::Ne,
-                value,
-            }
+            Condition { column, op: ConditionOp::Ne, value }
         }
         Rule::cond_bool => {
-            let column = strip_bracketed(
-                inner
-                    .into_inner()
-                    .next()
-                    .expect("bracketed_ident")
-                    .as_str(),
-            );
+            let column =
+                strip_bracketed(inner.into_inner().next().expect("bracketed_ident").as_str());
             Condition {
                 column,
                 op: ConditionOp::IsTrue,
@@ -481,11 +459,7 @@ fn build_subquery(pair: Pair<Rule>) -> Subquery {
             r => unreachable!("unexpected subquery child {r:?}"),
         }
     }
-    Subquery {
-        axes,
-        from: from.expect("cube name"),
-        where_clause,
-    }
+    Subquery { axes, from: from.expect("cube name"), where_clause }
 }
 
 fn build_subq_axis(pair: Pair<Rule>) -> SubqAxis {
@@ -537,9 +511,7 @@ fn build_axis_id(pair: Pair<Rule>) -> AxisId {
         Rule::kw_pages => AxisId::Pages,
         Rule::kw_chapters => AxisId::Chapters,
         Rule::kw_sections => AxisId::Sections,
-        Rule::integer_literal => {
-            AxisId::Index(inner.as_str().parse().expect("valid axis index"))
-        }
+        Rule::integer_literal => AxisId::Index(inner.as_str().parse().expect("valid axis index")),
         r => unreachable!("unexpected axis_id rule {r:?}"),
     }
 }
@@ -558,11 +530,7 @@ fn build_or_expr(pair: Pair<Rule>) -> Expr {
     let mut parts = pair.into_inner().map(build_and_expr);
     let mut acc = parts.next().expect("and_expr");
     for rhs in parts {
-        acc = Expr::BinaryOp {
-            op: BinOp::Or,
-            lhs: Box::new(acc),
-            rhs: Box::new(rhs),
-        };
+        acc = Expr::BinaryOp { op: BinOp::Or, lhs: Box::new(acc), rhs: Box::new(rhs) };
     }
     acc
 }
@@ -571,11 +539,7 @@ fn build_and_expr(pair: Pair<Rule>) -> Expr {
     let mut parts = pair.into_inner().map(build_not_expr);
     let mut acc = parts.next().expect("not_expr");
     for rhs in parts {
-        acc = Expr::BinaryOp {
-            op: BinOp::And,
-            lhs: Box::new(acc),
-            rhs: Box::new(rhs),
-        };
+        acc = Expr::BinaryOp { op: BinOp::And, lhs: Box::new(acc), rhs: Box::new(rhs) };
     }
     acc
 }
@@ -613,11 +577,7 @@ fn build_compare_expr(pair: Pair<Rule>) -> Expr {
                     s => unreachable!("unexpected compare_op {s:?}"),
                 };
                 let rhs = build_concat_expr(inner.next().expect("concat_expr"));
-                Expr::BinaryOp {
-                    op,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                }
+                Expr::BinaryOp { op, lhs: Box::new(lhs), rhs: Box::new(rhs) }
             }
             r => unreachable!("unexpected compare_expr tail rule {r:?}"),
         },
@@ -634,17 +594,9 @@ fn build_is_tail(lhs: Expr, pair: Pair<Rule>) -> Expr {
                 Rule::concat_expr => Some(Box::new(build_concat_expr(target))),
                 r => unreachable!("unexpected negated_is_tail body rule {r:?}"),
             };
-            Expr::Is {
-                lhs: Box::new(lhs),
-                rhs,
-                negated: true,
-            }
+            Expr::Is { lhs: Box::new(lhs), rhs, negated: true }
         }
-        Rule::kw_null => Expr::Is {
-            lhs: Box::new(lhs),
-            rhs: None,
-            negated: false,
-        },
+        Rule::kw_null => Expr::Is { lhs: Box::new(lhs), rhs: None, negated: false },
         Rule::concat_expr => Expr::Is {
             lhs: Box::new(lhs),
             rhs: Some(Box::new(build_concat_expr(inner))),
@@ -658,11 +610,7 @@ fn build_concat_expr(pair: Pair<Rule>) -> Expr {
     let mut parts = pair.into_inner().map(build_add_expr);
     let mut acc = parts.next().expect("add_expr");
     for rhs in parts {
-        acc = Expr::BinaryOp {
-            op: BinOp::Concat,
-            lhs: Box::new(acc),
-            rhs: Box::new(rhs),
-        };
+        acc = Expr::BinaryOp { op: BinOp::Concat, lhs: Box::new(acc), rhs: Box::new(rhs) };
     }
     acc
 }
@@ -683,11 +631,7 @@ fn build_add_expr(pair: Pair<Rule>) -> Expr {
             Rule::range_expr => {
                 let op = pending_op.take().expect("add_op before range_expr");
                 let rhs = build_range_expr(p);
-                acc = Expr::BinaryOp {
-                    op,
-                    lhs: Box::new(acc),
-                    rhs: Box::new(rhs),
-                };
+                acc = Expr::BinaryOp { op, lhs: Box::new(acc), rhs: Box::new(rhs) };
             }
             r => unreachable!("unexpected add_expr child {r:?}"),
         }
@@ -700,10 +644,7 @@ fn build_range_expr(pair: Pair<Rule>) -> Expr {
     let lo = build_mul_expr(inner.next().expect("mul_expr"));
     match inner.next() {
         None => lo,
-        Some(hi_pair) => Expr::Range {
-            lo: Box::new(lo),
-            hi: Box::new(build_mul_expr(hi_pair)),
-        },
+        Some(hi_pair) => Expr::Range { lo: Box::new(lo), hi: Box::new(build_mul_expr(hi_pair)) },
     }
 }
 
@@ -723,11 +664,7 @@ fn build_mul_expr(pair: Pair<Rule>) -> Expr {
             Rule::unary_expr => {
                 let op = pending_op.take().expect("mul_op before unary_expr");
                 let rhs = build_unary_expr(p);
-                acc = Expr::BinaryOp {
-                    op,
-                    lhs: Box::new(acc),
-                    rhs: Box::new(rhs),
-                };
+                acc = Expr::BinaryOp { op, lhs: Box::new(acc), rhs: Box::new(rhs) };
             }
             r => unreachable!("unexpected mul_expr child {r:?}"),
         }
@@ -755,11 +692,7 @@ fn build_postfix_expr(pair: Pair<Rule>) -> Expr {
         acc = match child.as_rule() {
             Rule::function_call => {
                 let (name, args) = build_function_call_parts(child);
-                Expr::MemberFunction {
-                    base: Box::new(acc),
-                    name,
-                    args,
-                }
+                Expr::MemberFunction { base: Box::new(acc), name, args }
             }
             Rule::bracketed_prop => Expr::MemberFunction {
                 base: Box::new(acc),
@@ -839,11 +772,7 @@ fn build_case_expr(pair: Pair<Rule>) -> Expr {
             r => unreachable!("unexpected case_expr child {r:?}"),
         }
     }
-    Expr::Case {
-        operand,
-        whens,
-        else_,
-    }
+    Expr::Case { operand, whens, else_ }
 }
 
 fn build_literal(pair: Pair<Rule>) -> Expr {
@@ -858,9 +787,9 @@ fn build_literal(pair: Pair<Rule>) -> Expr {
             quote: QuoteStyle::Double,
         }),
         Rule::kw_null => Expr::Literal(Literal::Null),
-        Rule::number_literal => {
-            Expr::Literal(Literal::Number(inner.as_str().parse().expect("valid number")))
-        }
+        Rule::number_literal => Expr::Literal(Literal::Number(
+            inner.as_str().parse().expect("valid number"),
+        )),
         r => unreachable!("unexpected literal rule {r:?}"),
     }
 }
