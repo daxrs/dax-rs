@@ -1,5 +1,6 @@
-use super::{parse_mdx, Rule};
+use super::{parse_mdx, MdxParser, Rule};
 use pest::iterators::{Pair, Pairs};
+use pest::Parser;
 
 #[derive(Debug, Clone)]
 pub struct Query {
@@ -196,13 +197,25 @@ pub enum UnaryOpKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
-    String(String),
+    String { value: String, quote: QuoteStyle },
     Number(f64),
     Null,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuoteStyle {
+    Single,
+    Double,
+}
+
 pub fn parse(input: &str) -> Result<Query, Box<pest::error::Error<Rule>>> {
     Ok(build_ast(parse_mdx(input)?))
+}
+
+pub fn parse_expr(input: &str) -> Result<Expr, Box<pest::error::Error<Rule>>> {
+    let mut pairs = MdxParser::parse(Rule::expr, input).map_err(Box::new)?;
+    let pair = pairs.next().expect("expr");
+    Ok(build_expr(pair))
 }
 
 pub fn build_ast(pairs: Pairs<Rule>) -> Query {
@@ -836,12 +849,14 @@ fn build_case_expr(pair: Pair<Rule>) -> Expr {
 fn build_literal(pair: Pair<Rule>) -> Expr {
     let inner = pair.into_inner().next().expect("literal body");
     match inner.as_rule() {
-        Rule::string_literal => {
-            Expr::Literal(Literal::String(unescape_quoted(inner.as_str(), '\'')))
-        }
-        Rule::dq_string_literal => {
-            Expr::Literal(Literal::String(unescape_quoted(inner.as_str(), '"')))
-        }
+        Rule::string_literal => Expr::Literal(Literal::String {
+            value: unescape_quoted(inner.as_str(), '\''),
+            quote: QuoteStyle::Single,
+        }),
+        Rule::dq_string_literal => Expr::Literal(Literal::String {
+            value: unescape_quoted(inner.as_str(), '"'),
+            quote: QuoteStyle::Double,
+        }),
         Rule::kw_null => Expr::Literal(Literal::Null),
         Rule::number_literal => {
             Expr::Literal(Literal::Number(inner.as_str().parse().expect("valid number")))
