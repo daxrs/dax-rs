@@ -73,6 +73,7 @@ pub struct EvaluatedSet {
 pub struct EvalCtx<'a> {
     pub engine: &'a Engine,
     pub named: HashMap<String, Expr>,
+    pub measures: HashMap<String, String>,
     cache: RefCell<HashMap<(String, String), Vec<Member>>>,
 }
 
@@ -81,6 +82,7 @@ impl<'a> EvalCtx<'a> {
         Self {
             engine,
             named: HashMap::new(),
+            measures: catalog_measures(engine),
             cache: RefCell::new(HashMap::new()),
         }
     }
@@ -90,18 +92,33 @@ impl<'a> EvalCtx<'a> {
         query: &ast::Query,
     ) -> Result<Self, Box<pest::error::Error<super::Rule>>> {
         let mut named = HashMap::new();
+        let mut measures = catalog_measures(engine);
         for item in &query.with_items {
-            if let WithItem::Set { name, expr } = normalize_with_item(item.clone())? {
-                if let [PathSegment::Bare(n)] = name.segments.as_slice() {
-                    named.insert(n.to_ascii_lowercase(), expr);
+            match normalize_with_item(item.clone())? {
+                WithItem::Set { name, expr } => {
+                    if let [PathSegment::Bare(n)] = name.segments.as_slice() {
+                        named.insert(n.to_ascii_lowercase(), expr);
+                    }
                 }
+                WithItem::Measure { column, dax, .. } => {
+                    measures.insert(column.to_ascii_lowercase(), dax);
+                }
+                WithItem::Member { .. } => {}
             }
         }
         Ok(Self {
             engine,
             named,
+            measures,
             cache: RefCell::new(HashMap::new()),
         })
+    }
+
+    pub fn resolve_measure(&self, name: &str) -> Result<&str, String> {
+        self.measures
+            .get(&name.to_ascii_lowercase())
+            .map(|s| s.as_str())
+            .ok_or_else(|| format!("unknown measure: {name}"))
     }
 
     fn resolve_all_members(&self, table: &str, hier: &str) -> Result<Vec<Member>, String> {
@@ -117,6 +134,25 @@ impl<'a> EvalCtx<'a> {
         let leaves = table_value_to_leaves(value, table, hier)?;
         self.cache.borrow_mut().insert(key, leaves.clone());
         Ok(leaves)
+    }
+}
+
+fn catalog_measures(engine: &Engine) -> HashMap<String, String> {
+    engine
+        .ctx()
+        .catalog
+        .measures
+        .iter()
+        .map(|(name, dax)| (name.to_ascii_lowercase(), dax.clone()))
+        .collect()
+}
+
+pub fn eval_slicer(where_clause: &Expr, ctx: &EvalCtx) -> Result<Vec<Member>, String> {
+    let set = eval_set(where_clause, ctx)?;
+    match set.tuples.as_slice() {
+        [tuple] => Ok(tuple.members.clone()),
+        [] => Err("WHERE clause evaluated to an empty set".to_string()),
+        _ => Err("WHERE clause must evaluate to a single tuple".to_string()),
     }
 }
 
