@@ -56,10 +56,7 @@ enum ResponseFormat {
     Multidimensional,
 }
 
-fn resolve_response_format(
-    format: FormatRequest,
-    is_dax: bool,
-) -> Result<ResponseFormat, String> {
+fn resolve_response_format(format: FormatRequest, is_dax: bool) -> Result<ResponseFormat, String> {
     match (format, is_dax) {
         (FormatRequest::Native, true) => Ok(ResponseFormat::Tabular),
         (FormatRequest::Native, false) => Ok(ResponseFormat::Multidimensional),
@@ -324,39 +321,35 @@ async fn xmla_handler(State(state): State<AppState>, headers: HeaderMap, body: B
                     };
 
                     let meta = d.model_meta();
-                    match resolve_response_format(
-                        FormatRequest::parse(execute.format()),
-                        false,
-                    ) {
+                    match resolve_response_format(FormatRequest::parse(execute.format()), false) {
                         Ok(ResponseFormat::Multidimensional) => {}
                         Ok(ResponseFormat::Tabular) => match translation.shape {
                             QueryShape::MeasuresOnly { ref measures } => {
                                 let n = measures.len();
-                                let values: Vec<Option<String>> = if let Some(ref dax) =
-                                    translation.cell_dax
-                                {
-                                    match d.execute_dax(dax) {
-                                        Ok(results) => results
-                                            .into_iter()
-                                            .next()
-                                            .and_then(|qr| qr.rows.into_iter().next())
-                                            .map(|row| {
-                                                (0..n)
-                                                    .map(|i| row.get(i).and_then(|v| v.clone()))
-                                                    .collect()
-                                            })
-                                            .unwrap_or_else(|| vec![None; n]),
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                error = %e,
-                                                "MDX tabular meas-only eval failed"
-                                            );
-                                            vec![None; n]
+                                let values: Vec<Option<String>> =
+                                    if let Some(ref dax) = translation.cell_dax {
+                                        match d.execute_dax(dax) {
+                                            Ok(results) => results
+                                                .into_iter()
+                                                .next()
+                                                .and_then(|qr| qr.rows.into_iter().next())
+                                                .map(|row| {
+                                                    (0..n)
+                                                        .map(|i| row.get(i).and_then(|v| v.clone()))
+                                                        .collect()
+                                                })
+                                                .unwrap_or_else(|| vec![None; n]),
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    error = %e,
+                                                    "MDX tabular meas-only eval failed"
+                                                );
+                                                vec![None; n]
+                                            }
                                         }
-                                    }
-                                } else {
-                                    vec![None; n]
-                                };
+                                    } else {
+                                        vec![None; n]
+                                    };
                                 return finish(
                                     &handlers::execute_mdx_tabular_measures_only(
                                         sid, measures, &values,
@@ -364,49 +357,43 @@ async fn xmla_handler(State(state): State<AppState>, headers: HeaderMap, body: B
                                     .0,
                                 );
                             }
-                            QueryShape::DimMeasureMatrix {
-                                ref dim_axis,
-                                ref measures,
-                                ..
-                            } => {
+                            QueryShape::DimMeasureMatrix { ref dim_axis, ref measures, .. } => {
                                 let n = measures.len();
-                                let cells: Vec<(String, Vec<Option<String>>)> = if let Some(
-                                    ref dax,
-                                ) =
-                                    translation.cell_dax
-                                {
-                                    match d.execute_dax(dax) {
-                                        Ok(results) => results
-                                            .into_iter()
-                                            .next()
-                                            .map(|qr| {
-                                                qr.rows
-                                                    .into_iter()
-                                                    .filter_map(|row| {
-                                                        let k =
-                                                            row.first().and_then(|v| v.clone())?;
-                                                        let vals = (0..n)
-                                                            .map(|i| {
-                                                                row.get(1 + i)
-                                                                    .and_then(|v| v.clone())
-                                                            })
-                                                            .collect();
-                                                        Some((k, vals))
-                                                    })
-                                                    .collect()
-                                            })
-                                            .unwrap_or_default(),
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                error = %e,
-                                                "MDX tabular dim-measure-matrix failed"
-                                            );
-                                            vec![]
+                                let cells: Vec<(String, Vec<Option<String>>)> =
+                                    if let Some(ref dax) = translation.cell_dax {
+                                        match d.execute_dax(dax) {
+                                            Ok(results) => results
+                                                .into_iter()
+                                                .next()
+                                                .map(|qr| {
+                                                    qr.rows
+                                                        .into_iter()
+                                                        .filter_map(|row| {
+                                                            let k = row
+                                                                .first()
+                                                                .and_then(|v| v.clone())?;
+                                                            let vals = (0..n)
+                                                                .map(|i| {
+                                                                    row.get(1 + i)
+                                                                        .and_then(|v| v.clone())
+                                                                })
+                                                                .collect();
+                                                            Some((k, vals))
+                                                        })
+                                                        .collect()
+                                                })
+                                                .unwrap_or_default(),
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    error = %e,
+                                                    "MDX tabular dim-measure-matrix failed"
+                                                );
+                                                vec![]
+                                            }
                                         }
-                                    }
-                                } else {
-                                    vec![]
-                                };
+                                    } else {
+                                        vec![]
+                                    };
                                 return finish(
                                     &handlers::execute_mdx_tabular_dim_measure(
                                         sid, dim_axis, measures, &cells,
@@ -527,7 +514,9 @@ async fn xmla_handler(State(state): State<AppState>, headers: HeaderMap, body: B
                                         .next()
                                         .and_then(|qr| qr.rows.into_iter().next())
                                         .map(|row| {
-                                            (0..n).map(|i| row.get(i).and_then(|v| v.clone())).collect()
+                                            (0..n)
+                                                .map(|i| row.get(i).and_then(|v| v.clone()))
+                                                .collect()
                                         })
                                         .unwrap_or_else(|| vec![None; n]),
                                     Err(e) => {
