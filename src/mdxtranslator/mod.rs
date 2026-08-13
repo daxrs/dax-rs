@@ -4,6 +4,8 @@
 //! this module. `mdxtranslator` starts from a general MDX grammar (see
 //! `mdx.pest`) rather than a fixed set of recognized query shapes.
 
+pub mod ast;
+
 use pest::iterators::Pairs;
 use pest::Parser;
 use pest_derive::Parser as PestParser;
