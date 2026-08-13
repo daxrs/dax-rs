@@ -374,7 +374,7 @@ pub fn eval_summarize(
     for (tbl, col) in &group_refs {
         if tbl != &table_name {
             let qualified = TableCol::new(tbl, col).to_string();
-            if df.column(&qualified).is_err() && df.column(col.as_str()).is_err() {
+            if df.column(&qualified).is_err() {
                 foreign_cols
                     .entry(tbl.clone())
                     .or_default()
