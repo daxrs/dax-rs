@@ -5,6 +5,7 @@
 //! `mdx.pest`) rather than a fixed set of recognized query shapes.
 
 pub mod ast;
+pub mod eval;
 
 use pest::iterators::Pairs;
 use pest::Parser;
