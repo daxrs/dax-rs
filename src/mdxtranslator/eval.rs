@@ -357,6 +357,7 @@ fn eval_function_call(name: &str, args: &[Option<Expr>], ctx: &EvalCtx) -> Resul
         "crossjoin" => eval_crossjoin(args, ctx),
         "hierarchize" => eval_hierarchize(args, ctx),
         "drilldownlevel" => eval_drilldown_level(args, ctx),
+        "addcalculatedmembers" => eval_add_calculated_members(args, ctx),
         other => Err(format!("unsupported function in set position: {other}")),
     }
 }
@@ -383,6 +384,13 @@ fn eval_crossjoin(args: &[Option<Expr>], ctx: &EvalCtx) -> Result<EvaluatedSet, 
 fn eval_hierarchize(args: &[Option<Expr>], ctx: &EvalCtx) -> Result<EvaluatedSet, String> {
     let [Some(inner)] = args else {
         return Err("Hierarchize requires one argument".to_string());
+    };
+    eval_set(inner, ctx)
+}
+
+fn eval_add_calculated_members(args: &[Option<Expr>], ctx: &EvalCtx) -> Result<EvaluatedSet, String> {
+    let [Some(inner)] = args else {
+        return Err("AddCalculatedMembers requires one argument".to_string());
     };
     eval_set(inner, ctx)
 }
@@ -418,21 +426,60 @@ fn eval_member_function_as_set(
     ctx: &EvalCtx,
 ) -> Result<EvaluatedSet, String> {
     match name.to_ascii_lowercase().as_str() {
-        "allmembers" | "members" => {
+        "allmembers" => {
             let Expr::Member(path) = base else {
                 return Err(format!("{name} requires a member base"));
             };
             let (table, hier) = table_hier_of(path)?;
-            let leaves = ctx.resolve_all_members(&table, &hier)?;
-            let shape = vec![HierarchyRef::Dimension { table, hier }];
-            let tuples = leaves
-                .into_iter()
-                .map(|m| Tuple { members: vec![m] })
-                .collect();
-            Ok(EvaluatedSet { shape, tuples })
+            all_members_set(ctx, table, hier)
+        }
+        "members" => {
+            let Expr::Member(path) = base else {
+                return Err("Members requires a member base".to_string());
+            };
+            match classify_member_path(path)? {
+                Member::All { table, hier } => Ok(EvaluatedSet {
+                    shape: vec![HierarchyRef::Dimension {
+                        table: table.clone(),
+                        hier: hier.clone(),
+                    }],
+                    tuples: vec![Tuple {
+                        members: vec![Member::All { table, hier }],
+                    }],
+                }),
+                Member::Leaf { .. } => {
+                    let (table, hier) = table_hier_of(path)?;
+                    all_members_set(ctx, table, hier)
+                }
+                Member::Measure { name } => Err(format!(
+                    "Members on a measure ([Measures].[{name}]) is not supported"
+                )),
+            }
+        }
+        "children" => {
+            let Expr::Member(path) = base else {
+                return Err("Children requires a member base".to_string());
+            };
+            let Member::All { table, hier } = classify_member_path(path)? else {
+                return Err(
+                    "Children is only supported on the [All] member (not yet supported on a specific member)"
+                        .to_string(),
+                );
+            };
+            all_members_set(ctx, table, hier)
         }
         other => Err(format!("unsupported member function in set position: .{other}")),
     }
+}
+
+fn all_members_set(ctx: &EvalCtx, table: String, hier: String) -> Result<EvaluatedSet, String> {
+    let leaves = ctx.resolve_all_members(&table, &hier)?;
+    let shape = vec![HierarchyRef::Dimension { table, hier }];
+    let tuples = leaves
+        .into_iter()
+        .map(|m| Tuple { members: vec![m] })
+        .collect();
+    Ok(EvaluatedSet { shape, tuples })
 }
 
 #[cfg(test)]
