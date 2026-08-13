@@ -8,7 +8,7 @@ pub fn generate_dax(
     let (groupby_positions, shape, measure_names) = match set {
         None => (Vec::new(), Vec::new(), slicer_measure_names(slicer)?),
         Some(set) => {
-            let groupby_positions = classify_groupby_positions(set)?;
+            let groupby_positions = classify_groupby_positions(set);
             let measure_position = set
                 .shape
                 .iter()
@@ -35,20 +35,51 @@ pub fn generate_dax(
         .collect::<Vec<_>>()
         .join(", ");
 
+    let col_ref = |i: usize| -> String {
+        match &shape[i] {
+            HierarchyRef::Dimension { table, hier } => format!("'{table}'[{hier}]"),
+            HierarchyRef::Measures => {
+                unreachable!("a group-by position can never be the Measures hierarchy")
+            }
+        }
+    };
+
+    let has_mixed = groupby_positions.iter().any(|&(_, is_mixed)| is_mixed);
+
     let inner = if groupby_positions.is_empty() {
         format!("ROW({measure_cols})")
     } else {
+        let mut flag_idx = 0usize;
         let cols = groupby_positions
             .iter()
-            .map(|&i| match &shape[i] {
-                HierarchyRef::Dimension { table, hier } => format!("'{table}'[{hier}]"),
-                HierarchyRef::Measures => {
-                    unreachable!("a group-by position can never be the Measures hierarchy")
+            .map(|&(i, is_mixed)| {
+                let col = col_ref(i);
+                if is_mixed {
+                    let flag = format!("ROLLUPADDISSUBTOTAL({col}, \"_IsTotal_{flag_idx}\")");
+                    flag_idx += 1;
+                    flag
+                } else {
+                    col
                 }
             })
             .collect::<Vec<_>>()
             .join(", ");
-        format!("SUMMARIZECOLUMNS({cols}, {measure_cols})")
+        let summarize = format!("SUMMARIZECOLUMNS({cols}, {measure_cols})");
+        if has_mixed {
+            let mut select_args: Vec<String> = groupby_positions
+                .iter()
+                .map(|&(i, _)| {
+                    let col = col_ref(i);
+                    format!("\"{col}\", {col}")
+                })
+                .collect();
+            for mi in 0..measure_pairs.len() {
+                select_args.push(format!("\"M{mi}\", [M{mi}]"));
+            }
+            format!("SELECTCOLUMNS({summarize}, {})", select_args.join(", "))
+        } else {
+            summarize
+        }
     };
 
     let filters = slicer_filters(slicer);
@@ -60,8 +91,8 @@ pub fn generate_dax(
     Ok(format!("EVALUATE {inner}"))
 }
 
-fn classify_groupby_positions(set: &EvaluatedSet) -> Result<Vec<usize>, String> {
-    let mut groupby_positions = Vec::new();
+fn classify_groupby_positions(set: &EvaluatedSet) -> Vec<(usize, bool)> {
+    let mut positions = Vec::new();
     for (i, href) in set.shape.iter().enumerate() {
         match href {
             HierarchyRef::Measures => {}
@@ -75,17 +106,14 @@ fn classify_groupby_positions(set: &EvaluatedSet) -> Result<Vec<usize>, String> 
                     .iter()
                     .all(|t| matches!(t.members[i], Member::Leaf { .. }));
                 if all_leaf {
-                    groupby_positions.push(i);
+                    positions.push((i, false));
                 } else if !all_all {
-                    return Err(
-                        "mixed All/Leaf shapes require multi-partition generation (not yet supported)"
-                            .to_string(),
-                    );
+                    positions.push((i, true));
                 }
             }
         }
     }
-    Ok(groupby_positions)
+    positions
 }
 
 fn distinct_measure_names(set: &EvaluatedSet, measure_position: usize) -> Vec<String> {
