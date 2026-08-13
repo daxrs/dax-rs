@@ -86,14 +86,25 @@ fn make_schema(columns: &[(&str, &str)]) -> String {
     )
 }
 
-fn make_dax_schema(columns: &[(&str, &str)]) -> String {
+/// Matches real Fabric's column naming: `C0`.."C9" under 10 total columns,
+/// zero-padded to the widest index (`C00`.."C10", etc.) at 10 or more.
+fn tabular_col(i: usize, total: usize) -> String {
+    let width = total.saturating_sub(1).to_string().len().max(1);
+    format!("C{i:0width$}")
+}
+
+fn make_tabular_schema(columns: &[(&str, Option<&str>)]) -> String {
+    let total = columns.len();
     let cols: String = columns
         .iter()
         .enumerate()
         .map(|(i, (field, typ))| {
-            format!(
-                r#"<xsd:element sql:field="{field}" name="C{i}" type="xsd:{typ}" minOccurs="0"/>"#
-            )
+            let type_attr = match typ {
+                Some(t) => format!(r#" type="xsd:{t}""#),
+                None => String::new(),
+            };
+            let name = tabular_col(i, total);
+            format!(r#"<xsd:element sql:field="{field}" name="{name}"{type_attr} minOccurs="0"/>"#)
         })
         .collect();
     format!(
@@ -2111,11 +2122,11 @@ pub fn execute_query_result(
     let mut roots: Vec<String> = Vec::with_capacity(results.len());
     let mut total_rows = 0usize;
     for result in &results {
-        let schema = make_dax_schema(
+        let schema = make_tabular_schema(
             &result
                 .columns
                 .iter()
-                .map(|(name, xsd)| (name.as_str(), xsd.as_str()))
+                .map(|(name, xsd)| (name.as_str(), Some(xsd.as_str())))
                 .collect::<Vec<_>>(),
         );
 
@@ -2160,10 +2171,184 @@ pub fn execute_query_result(
     execute_xml(session_id, format!("{rowset_body}{metrics_xml}"))
 }
 
+pub fn execute_mdx_tabular_measures_only(
+    session_id: Option<&str>,
+    measures: &[(String, String)],
+    values: &[Option<String>],
+) -> (String, Response) {
+    let fields: Vec<String> = measures
+        .iter()
+        .map(|(name, _)| format!("[Measures].[{name}]"))
+        .collect();
+    let columns: Vec<(&str, Option<&str>)> = fields.iter().map(|f| (f.as_str(), None)).collect();
+    let schema = make_tabular_schema(&columns);
+
+    let total = values.len();
+    let mut row = String::from("<row>");
+    for (i, value) in values.iter().enumerate() {
+        if let Some(v) = value {
+            let tag = tabular_col(i, total);
+            row.push_str(&format!("<{tag}>{}</{tag}>", xml_escape_value(v)));
+        }
+    }
+    row.push_str("</row>");
+
+    execute_xml(session_id, rowset(&schema, &row))
+}
+
+pub fn execute_mdx_tabular_dim_measure(
+    session_id: Option<&str>,
+    dim_axis: &crate::mdx::AxisPlan,
+    measures: &[(String, String)],
+    cells: &[(String, Vec<Option<String>>)],
+) -> (String, Response) {
+    let hier_uname = format!("[{}].[{}]", dim_axis.table, dim_axis.hier);
+    let field_prefix = format!(
+        "[{}].[{}].[{}]",
+        dim_axis.table, dim_axis.hier, dim_axis.level
+    );
+
+    let dim_props: Vec<&str> = dim_axis
+        .dim_props
+        .iter()
+        .map(|p| p.as_str())
+        .filter(|p| *p == "MEMBER_UNIQUE_NAME" || *p == "MEMBER_CAPTION")
+        .collect();
+
+    let mut fields: Vec<(String, Option<&str>)> = dim_props
+        .iter()
+        .map(|p| (format!("{field_prefix}.[{p}]"), Some("string")))
+        .collect();
+    fields.extend(
+        measures
+            .iter()
+            .map(|(name, _)| (format!("[Measures].[{name}]"), None)),
+    );
+
+    let columns: Vec<(&str, Option<&str>)> = fields.iter().map(|(f, t)| (f.as_str(), *t)).collect();
+    let schema = make_tabular_schema(&columns);
+
+    let total = columns.len();
+    let mut rows_xml = String::new();
+    for (key, vals) in cells {
+        rows_xml.push_str("<row>");
+        let mut col_idx = 0;
+        for prop in &dim_props {
+            let tag = tabular_col(col_idx, total);
+            match *prop {
+                "MEMBER_UNIQUE_NAME" => {
+                    let uname = member_unique_name(&hier_uname, key);
+                    rows_xml.push_str(&format!("<{tag}>{uname}</{tag}>"));
+                }
+                "MEMBER_CAPTION" => {
+                    rows_xml.push_str(&format!("<{tag}>{}</{tag}>", xml_escape_value(key)));
+                }
+                _ => {}
+            }
+            col_idx += 1;
+        }
+        for val in vals {
+            if let Some(v) = val {
+                let tag = tabular_col(col_idx, total);
+                rows_xml.push_str(&format!("<{tag}>{}</{tag}>", xml_escape_value(v)));
+            }
+            col_idx += 1;
+        }
+        rows_xml.push_str("</row>");
+    }
+
+    execute_xml(session_id, rowset(&schema, &rows_xml))
+}
+
+pub fn execute_mdx_tabular_multi_dim_crossjoin(
+    session_id: Option<&str>,
+    dims: &[crate::mdx::AxisPlan],
+    measures: &[(String, String)],
+    cells: &[Vec<Option<String>>],
+) -> (String, Response) {
+    let hier_unames: Vec<String> = dims
+        .iter()
+        .map(|d| format!("[{}].[{}]", d.table, d.hier))
+        .collect();
+    let dim_props: Vec<Vec<&str>> = dims
+        .iter()
+        .map(|d| {
+            d.dim_props
+                .iter()
+                .map(|p| p.as_str())
+                .filter(|p| *p == "MEMBER_UNIQUE_NAME" || *p == "MEMBER_CAPTION")
+                .collect()
+        })
+        .collect();
+    let field_prefixes: Vec<String> = dims
+        .iter()
+        .map(|d| format!("[{}].[{}].[{}]", d.table, d.hier, d.level))
+        .collect();
+
+    let mut fields: Vec<(String, Option<&str>)> = Vec::new();
+    for (i, props) in dim_props.iter().enumerate() {
+        for prop in props {
+            fields.push((format!("{}.[{prop}]", field_prefixes[i]), Some("string")));
+        }
+    }
+    fields.extend(
+        measures
+            .iter()
+            .map(|(name, _)| (format!("[Measures].[{name}]"), None)),
+    );
+
+    let columns: Vec<(&str, Option<&str>)> = fields.iter().map(|(f, t)| (f.as_str(), *t)).collect();
+    let schema = make_tabular_schema(&columns);
+
+    let n_dims = dims.len();
+    let total = columns.len();
+    let mut rows_xml = String::new();
+    for row in cells {
+        rows_xml.push_str("<row>");
+        let mut col_idx = 0;
+        for (i, props) in dim_props.iter().enumerate() {
+            let key = row.get(i).and_then(|v| v.as_ref());
+            for prop in props {
+                if let Some(k) = key {
+                    let tag = tabular_col(col_idx, total);
+                    match *prop {
+                        "MEMBER_UNIQUE_NAME" => {
+                            let uname = member_unique_name(&hier_unames[i], k);
+                            rows_xml.push_str(&format!("<{tag}>{uname}</{tag}>"));
+                        }
+                        "MEMBER_CAPTION" => {
+                            rows_xml.push_str(&format!("<{tag}>{}</{tag}>", xml_escape_value(k)));
+                        }
+                        _ => {}
+                    }
+                }
+                col_idx += 1;
+            }
+        }
+        for m_idx in 0..measures.len() {
+            if let Some(v) = row.get(n_dims + m_idx).and_then(|v| v.as_ref()) {
+                let tag = tabular_col(col_idx, total);
+                rows_xml.push_str(&format!("<{tag}>{}</{tag}>", xml_escape_value(v)));
+            }
+            col_idx += 1;
+        }
+        rows_xml.push_str("</row>");
+    }
+
+    execute_xml(session_id, rowset(&schema, &rows_xml))
+}
+
 fn xml_escape_value(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+/// Builds a leaf member's unique name: `{hier_uname}.&[{caption}]`, with the
+/// `&` written as the XML entity `&amp;` and `caption` XML-escaped.
+/// `hier_uname` must already be XML-safe.
+fn member_unique_name(hier_uname: &str, caption: &str) -> String {
+    format!("{hier_uname}.&amp;[{}]", xml_escape_value(caption))
 }
 
 fn xml_escape_attr(s: &str) -> String {
@@ -4805,8 +4990,7 @@ fn build_leaf_member_tuple(
     dim_props: &[String],
 ) -> String {
     let cap_esc = xml_escape_value(caption);
-    // The unique name uses &[key] syntax; & is encoded as &amp; in XML text.
-    let uname = format!("{}.&amp;[{}]", hier_uname, cap_esc);
+    let uname = member_unique_name(hier_uname, caption);
 
     let mut member = format!(
         concat!(
@@ -5202,10 +5386,11 @@ fn build_norm_members_block_compact(
 
     for val in leaf_values {
         let cap = xml_escape_value(val);
+        let uname = member_unique_name(hier_uname, val);
         members.push_str(&format!(
             concat!(
                 "<ns2:Member>",
-                "<ns2:UName>{hier}.&amp;[{cap}]</ns2:UName>",
+                "<ns2:UName>{uname}</ns2:UName>",
                 "<ns2:Caption>{cap}</ns2:Caption>",
                 "<ns2:LName>{lname}</ns2:LName>",
                 "<ns2:LNum>1</ns2:LNum>",
@@ -5213,6 +5398,7 @@ fn build_norm_members_block_compact(
                 "<ns2:HIERARCHY_UNIQUE_NAME>{hier}</ns2:HIERARCHY_UNIQUE_NAME>",
                 "</ns2:Member>",
             ),
+            uname = uname,
             hier = hier_uname,
             cap = cap,
             lname = xml_escape_value(leaf_lname),
@@ -5268,10 +5454,11 @@ fn build_norm_members_block(
     // Actual leaf members.
     for val in leaf_values {
         let cap = xml_escape_value(val);
+        let uname = member_unique_name(hier_uname, val);
         members.push_str(&format!(
             concat!(
                 "<ns2:Member>",
-                "<ns2:UName>{hier}.&amp;[{cap}]</ns2:UName>",
+                "<ns2:UName>{uname}</ns2:UName>",
                 "<ns2:Caption>{cap}</ns2:Caption>",
                 "<ns2:LName>{lname}</ns2:LName>",
                 "<ns2:LNum>1</ns2:LNum>",
@@ -5279,6 +5466,7 @@ fn build_norm_members_block(
                 "<ns2:HIERARCHY_UNIQUE_NAME>{hier}</ns2:HIERARCHY_UNIQUE_NAME>",
                 "</ns2:Member>",
             ),
+            uname = uname,
             hier = hier_uname,
             cap = cap,
             lname = xml_escape_value(leaf_lname),

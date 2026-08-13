@@ -113,6 +113,7 @@ enum AxisContent {
         measures: Vec<(String, String)>,
         measures_position: usize,
     },
+    MultiDim(Vec<AxisPlan>),
 }
 
 fn classify_axis(axis: &Axis, calc_measures: &[(String, String)]) -> Result<AxisContent, MdxError> {
@@ -132,6 +133,9 @@ fn classify_axis(axis: &Axis, calc_measures: &[(String, String)]) -> Result<Axis
         try_extract_multi_dim_crossjoin(&axis.set, calc_measures, axis.id, &axis.dim_props)
     {
         return Ok(AxisContent::MultiDimCrossJoin { dims, measures, measures_position });
+    }
+    if let Some(dims) = try_extract_plain_multi_dim_crossjoin(&axis.set, axis.id, &axis.dim_props) {
+        return Ok(AxisContent::MultiDim(dims));
     }
     Ok(AxisContent::Dim(extract_axis(axis)?))
 }
@@ -346,6 +350,31 @@ pub fn mdx_to_dax(query: &MdxQuery) -> Result<DaxTranslation, MdxError> {
                 .map(|d| (d.table.as_str(), d.level.as_str()))
                 .collect();
             let cell_dax = build_summarize_dax(&groupby, &filter_args, &meas);
+            Ok(DaxTranslation {
+                cube,
+                cell_dax: Some(cell_dax),
+                total_dax: None,
+                non_empty,
+                cell_props: query.cell_props.clone(),
+                shape: QueryShape::SingleAxisMultiDimCrossJoin {
+                    dims,
+                    measures,
+                    measures_position,
+                },
+            })
+        }
+
+        // ── SingleAxisMultiDimCrossJoin split across axes: Measures ON COLUMNS,
+        // plain N-dim CrossJoin ON ROWS (no measures embedded in the crossjoin) ──
+        (Some(AxisContent::Measures(measures)), Some(AxisContent::MultiDim(dims)))
+        | (Some(AxisContent::MultiDim(dims)), Some(AxisContent::Measures(measures))) => {
+            let meas = format_measure_cols(&measures);
+            let groupby: Vec<(&str, &str)> = dims
+                .iter()
+                .map(|d| (d.table.as_str(), d.level.as_str()))
+                .collect();
+            let cell_dax = build_summarize_dax(&groupby, &filter_args, &meas);
+            let measures_position = dims.len();
             Ok(DaxTranslation {
                 cube,
                 cell_dax: Some(cell_dax),
@@ -1140,6 +1169,27 @@ fn try_extract_multi_dim_crossjoin(
     }
 
     Some((dims, measures, measures_position))
+}
+
+/// Plain N-dim CrossJoin with no measures embedded, e.g.
+/// `CrossJoin(dim1.AllMembers, CrossJoin(dim2.AllMembers, dim3.AllMembers))`.
+fn try_extract_plain_multi_dim_crossjoin(
+    set: &SetExpr,
+    axis_id: u32,
+    dim_props: &[String],
+) -> Option<Vec<AxisPlan>> {
+    let inner = match set {
+        SetExpr::Hierarchize(inner) | SetExpr::AddCalculatedMembers(inner) => inner.as_ref(),
+        other => other,
+    };
+    let parts = flatten_crossjoin_parts(inner);
+    if parts.len() < 2 || parts.iter().any(|p| is_all_measures_set(p)) {
+        return None;
+    }
+    parts
+        .iter()
+        .map(|part| extract_plan_from_set(part, axis_id, dim_props))
+        .collect()
 }
 
 // ── Generate / Ascendants axis detection ──────────────────────────────────────
