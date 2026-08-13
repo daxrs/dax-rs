@@ -86,11 +86,13 @@ fn enrich_with_foreign_cols(
             let right_df = ctx.get_filtered_df(&step.right_table, fc, rc)?;
 
             let mut to_select = vec![step.right_col.clone()];
+            let mut aliases: Vec<(String, String)> = Vec::new();
             if is_last {
                 for c in cols_needed {
                     if !to_select.contains(c) {
                         to_select.push(c.clone());
                     }
+                    aliases.push((c.clone(), TableCol::new(foreign_table, c).to_string()));
                 }
             } else {
                 let next_left = &path[i + 1].left_col;
@@ -99,9 +101,27 @@ fn enrich_with_foreign_cols(
                 }
             }
 
-            let right_slim = right_df
+            let mut right_slim = right_df
                 .select(to_select)
                 .map_err(|e| DaxError::Eval(format!("{fn_name}: select failed: {e}")))?;
+
+            for (orig, alias) in &aliases {
+                if orig == &step.right_col {
+                    let dup = right_slim
+                        .column(orig)
+                        .map_err(|_| {
+                            DaxError::Eval(format!("{fn_name}: column '{orig}' not found"))
+                        })?
+                        .as_materialized_series()
+                        .clone()
+                        .with_name(alias.as_str().into());
+                    right_slim.with_column(dup.into()).map_err(|e| {
+                        DaxError::Eval(format!("{fn_name}: with_column failed: {e}"))
+                    })?;
+                } else {
+                    right_slim.rename(orig, alias.as_str().into()).ok();
+                }
+            }
 
             let left_col_resolved = if enriched.column(&step.left_col).is_ok() {
                 step.left_col.clone()
@@ -622,7 +642,17 @@ pub fn eval_summarize_columns(
         "SUMMARIZECOLUMNS",
     )?;
 
-    let col_names: Vec<String> = all_group_refs.iter().map(|(_, c)| c.clone()).collect();
+    let col_names: Vec<String> = all_group_refs
+        .iter()
+        .map(|(t, c)| {
+            let qualified = TableCol::new(t, c).to_string();
+            if enriched.column(&qualified).is_ok() {
+                qualified
+            } else {
+                c.clone()
+            }
+        })
+        .collect();
     let mut result = select_unique(&enriched, &col_names, "SUMMARIZECOLUMNS")?;
 
     let num_rows = result.height();
@@ -644,10 +674,10 @@ pub fn eval_summarize_columns(
             let mut group_fc = base_fc.clone();
             group_fc.outer_fc = Some(Box::new(fc.clone()));
             group_fc.scoped_columns = all_group_refs.iter().cloned().collect();
-            for (owning_table, col_name) in &all_group_refs {
+            for ((owning_table, col_name), resolved) in all_group_refs.iter().zip(col_names.iter()) {
                 let key_series = result
-                    .column(col_name)
-                    .expect("all_group_refs columns were successfully selected into result")
+                    .column(resolved)
+                    .expect("resolved columns were successfully selected into result")
                     .as_materialized_series();
                 let key_val = key_series
                     .get(row_idx)
