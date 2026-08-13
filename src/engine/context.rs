@@ -594,7 +594,7 @@ impl ExecutionContext {
         let cache_key;
 
         if let Some(override_df) = fc.table_overrides.get(table_name) {
-            df = override_df.clone();
+            df = self.widen_table_override(table_name, override_df)?;
             cache_key = None;
         } else {
             let key = filter_fingerprint(table_name, fc);
@@ -630,6 +630,59 @@ impl ExecutionContext {
             rc.filter_cache_insert(key, df.clone());
         }
         Ok(df)
+    }
+
+    /// A `table_overrides` entry can be narrower than `table_name`'s full
+    /// schema — e.g. `FILTER(ALL(Product[Color]), ISBLANK(Product[Color]))`
+    /// used as a CALCULATE modifier stores just the (filtered) `Color`
+    /// column, not a full row-level slice of `Product`. Reading any other
+    /// column (e.g. `ProductSK` for relationship propagation) directly from
+    /// that override previously failed with "join column ... not found".
+    ///
+    /// Real DAX treats a column-scoped filter as a restriction on that
+    /// column's values, not a replacement for the table's other columns: a
+    /// LEFT OUTER JOIN of the override back onto the full table (on the
+    /// override's own columns) reconstructs the correct full-width row set —
+    /// including the case where the override's value doesn't correspond to
+    /// any real row (e.g. the synthesized blank/unknown member), which
+    /// correctly leaves the other columns blank instead of erroring or
+    /// dropping the row (confirmed against Fabric: `CALCULATETABLE(VALUES(
+    /// Product[ProductType]), FILTER(ALL(Product[Color]), ISBLANK(Product[
+    /// Color])))` returns one row with `ProductType` blank).
+    fn widen_table_override(
+        &self,
+        table_name: &str,
+        override_df: &DataFrame,
+    ) -> DaxResult<DataFrame> {
+        let full = self
+            .tables
+            .get(table_name)
+            .ok_or_else(|| DaxError::UnknownName(format!("unknown table '{table_name}'")))?;
+
+        let override_cols: HashSet<&str> = override_df
+            .get_column_names()
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+        let full_cols: HashSet<&str> = full.get_column_names().iter().map(|s| s.as_str()).collect();
+        if full_cols.iter().all(|c| override_cols.contains(c)) {
+            return Ok(override_df.clone());
+        }
+
+        let join_keys: Vec<String> = override_df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut join_args = JoinArgs::new(JoinType::Left);
+        join_args.nulls_equal = true;
+        override_df
+            .join(full, &join_keys, &join_keys, join_args, None)
+            .map_err(|e| {
+                DaxError::Eval(format!(
+                    "failed to reconstruct full row context for '{table_name}' from a column-scoped filter: {e}"
+                ))
+            })
     }
 
     pub fn expanded_filter_context(
