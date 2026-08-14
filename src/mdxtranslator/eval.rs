@@ -69,8 +69,20 @@ pub struct EvalCtx<'a> {
     pub engine: &'a Engine,
     pub named: HashMap<String, Expr>,
     pub measures: HashMap<String, String>,
+    pub calculated_members: HashMap<String, Expr>,
     cache: RefCell<HashMap<(String, String), Vec<Member>>>,
     filtered_cache: RefCell<HashMap<(String, String, String, String), Vec<Member>>>,
+    current_member: RefCell<Vec<Member>>,
+}
+
+/// RAII guard for a `CurrentMember` binding pushed by `EvalCtx::with_current_member` —
+/// pops the binding when dropped, including on early return via `?`.
+struct CurrentMemberGuard<'a>(&'a RefCell<Vec<Member>>);
+
+impl Drop for CurrentMemberGuard<'_> {
+    fn drop(&mut self) {
+        self.0.borrow_mut().pop();
+    }
 }
 
 impl<'a> EvalCtx<'a> {
@@ -79,8 +91,10 @@ impl<'a> EvalCtx<'a> {
             engine,
             named: HashMap::new(),
             measures: catalog_measures(engine),
+            calculated_members: HashMap::new(),
             cache: RefCell::new(HashMap::new()),
             filtered_cache: RefCell::new(HashMap::new()),
+            current_member: RefCell::new(Vec::new()),
         }
     }
 
@@ -90,6 +104,7 @@ impl<'a> EvalCtx<'a> {
     ) -> Result<Self, Box<pest::error::Error<super::Rule>>> {
         let mut named = HashMap::new();
         let mut measures = catalog_measures(engine);
+        let mut calculated_members = HashMap::new();
         for item in &query.with_items {
             match normalize_with_item(item.clone())? {
                 WithItem::Set { name, expr } => {
@@ -102,11 +117,16 @@ impl<'a> EvalCtx<'a> {
                 }
                 WithItem::Member { name, expr, .. } => {
                     if name.is_measure() {
-                        if let (Some(dax), Some(measure_name)) = (
-                            literal_to_dax(&expr),
-                            name.segments.last().map(segment_text),
-                        ) {
-                            measures.insert(measure_name.to_ascii_lowercase(), dax);
+                        if let Some(measure_name) = name.segments.last().map(segment_text) {
+                            match literal_to_dax(&expr) {
+                                Some(dax) => {
+                                    measures.insert(measure_name.to_ascii_lowercase(), dax);
+                                }
+                                None => {
+                                    calculated_members
+                                        .insert(measure_name.to_ascii_lowercase(), expr);
+                                }
+                            }
                         }
                     }
                 }
@@ -116,9 +136,37 @@ impl<'a> EvalCtx<'a> {
             engine,
             named,
             measures,
+            calculated_members,
             cache: RefCell::new(HashMap::new()),
             filtered_cache: RefCell::new(HashMap::new()),
+            current_member: RefCell::new(Vec::new()),
         })
+    }
+
+    /// Binds `m` as the current member for its hierarchy for the duration of
+    /// the returned guard's lifetime (popped on drop, including on early
+    /// return via `?`) — the MDX analogue of DAX's row context, used by
+    /// `Generate` to bind CurrentMember while evaluating its second argument.
+    fn with_current_member(&self, m: Member) -> CurrentMemberGuard<'_> {
+        self.current_member.borrow_mut().push(m);
+        CurrentMemberGuard(&self.current_member)
+    }
+
+    fn current_member_for(&self, table: &str, hier: &str) -> Result<Member, String> {
+        self.current_member
+            .borrow()
+            .iter()
+            .rev()
+            .find(|m| {
+                let (t, h) = match m {
+                    Member::Leaf { table, hier, .. } => (table.as_str(), hier.as_str()),
+                    Member::All { table, hier } => (table.as_str(), hier.as_str()),
+                    Member::Measure { .. } => return false,
+                };
+                t == table && h == hier
+            })
+            .cloned()
+            .ok_or_else(|| format!("CurrentMember: no current member bound for [{table}].[{hier}]"))
     }
 
     pub fn resolve_measure(&self, name: &str) -> Result<&str, String> {
@@ -128,7 +176,11 @@ impl<'a> EvalCtx<'a> {
             .ok_or_else(|| format!("unknown measure: {name}"))
     }
 
-    fn resolve_all_members(&self, table: &str, hier: &str) -> Result<Vec<Member>, String> {
+    pub(super) fn resolve_all_members(
+        &self,
+        table: &str,
+        hier: &str,
+    ) -> Result<Vec<Member>, String> {
         let key = (table.to_string(), hier.to_string());
         if let Some(cached) = self.cache.borrow().get(&key) {
             return Ok(cached.clone());
@@ -273,7 +325,7 @@ fn is_all_marker(s: &str) -> bool {
     s.eq_ignore_ascii_case("All") || s.eq_ignore_ascii_case("(All)")
 }
 
-fn table_hier_of(path: &MemberPath) -> Result<(String, String), String> {
+pub(super) fn table_hier_of(path: &MemberPath) -> Result<(String, String), String> {
     let table = path
         .segments
         .first()
@@ -374,9 +426,18 @@ pub fn eval_set(expr: &Expr, ctx: &EvalCtx) -> Result<EvaluatedSet, String> {
     }
 }
 
-fn eval_member(expr: &Expr, _ctx: &EvalCtx) -> Result<Member, String> {
+fn eval_member(expr: &Expr, ctx: &EvalCtx) -> Result<Member, String> {
     match expr {
         Expr::Member(path) => classify_member_path(path),
+        Expr::MemberFunction { base, name, args }
+            if args.is_empty() && name.eq_ignore_ascii_case("currentmember") =>
+        {
+            let Expr::Member(path) = base.as_ref() else {
+                return Err("CurrentMember requires a hierarchy reference base".to_string());
+            };
+            let (table, hier) = table_hier_of(path)?;
+            ctx.current_member_for(&table, &hier)
+        }
         other => Err(format!("{other:?} is not a member-shaped expression")),
     }
 }
@@ -403,8 +464,79 @@ fn eval_function_call(
         "drilldownlevel" => eval_drilldown_level(args, ctx),
         "drilldownmember" => eval_drilldown_member(args, ctx),
         "addcalculatedmembers" => eval_add_calculated_members(args, ctx),
+        "generate" => eval_generate(args, ctx),
+        "ascendants" => eval_ascendants(args, ctx),
         other => Err(format!("unsupported function in set position: {other}")),
     }
+}
+
+/// `Generate(set, body)` — evaluates `set`, then for each of its tuples binds
+/// every member as CurrentMember (for that member's hierarchy) and evaluates
+/// `body` (itself a set expression, which may reference CurrentMember),
+/// unioning the results across iterations. General over any input set size
+/// and any body expression — not specific to a single-tuple input.
+fn eval_generate(args: &[Option<Expr>], ctx: &EvalCtx) -> Result<EvaluatedSet, String> {
+    let [Some(set_expr), Some(body_expr)] = args else {
+        return Err("Generate requires two arguments".to_string());
+    };
+    let outer = eval_set(set_expr, ctx)?;
+    let mut shape: Option<Vec<HierarchyRef>> = None;
+    let mut tuples = Vec::new();
+    for t in &outer.tuples {
+        let guards: Vec<_> = t
+            .members
+            .iter()
+            .map(|m| ctx.with_current_member(m.clone()))
+            .collect();
+        let sub = eval_set(body_expr, ctx)?;
+        drop(guards);
+        match &shape {
+            None => shape = Some(sub.shape.clone()),
+            Some(s) if *s == sub.shape => {}
+            Some(_) => {
+                return Err(
+                    "Generate: body produced mismatched shapes across iterations".to_string(),
+                )
+            }
+        }
+        tuples.extend(sub.tuples);
+    }
+    Ok(EvaluatedSet { shape: shape.unwrap_or_default(), tuples })
+}
+
+/// `Ascendants(member)` — the member itself plus every ancestor up to and
+/// including `[hier].[All]`, ordered root-first (matching the axis-tuple
+/// order real Fabric returns). This corpus only has flat (single-level)
+/// hierarchies, so a leaf's only ancestor is `All`; written as a walk-to-root
+/// loop rather than a single hardcoded step so it generalizes to a deeper
+/// hierarchy if one is ever added.
+fn eval_ascendants(args: &[Option<Expr>], ctx: &EvalCtx) -> Result<EvaluatedSet, String> {
+    let [Some(member_expr)] = args else {
+        return Err("Ascendants requires one argument".to_string());
+    };
+    let member = eval_member(member_expr, ctx)?;
+    let shape = vec![hierarchy_ref_of(&member)];
+    let mut chain = vec![member.clone()];
+    let mut current = member;
+    loop {
+        current = match current {
+            Member::Leaf { table, hier, .. } => {
+                let all = Member::All { table, hier };
+                chain.push(all.clone());
+                all
+            }
+            Member::All { .. } => break,
+            Member::Measure { .. } => {
+                return Err("Ascendants is not supported on a measure".to_string())
+            }
+        };
+    }
+    chain.reverse();
+    let tuples = chain
+        .into_iter()
+        .map(|m| Tuple { members: vec![m] })
+        .collect();
+    Ok(EvaluatedSet { shape, tuples })
 }
 
 fn eval_crossjoin(args: &[Option<Expr>], ctx: &EvalCtx) -> Result<EvaluatedSet, String> {
@@ -549,7 +681,7 @@ fn eval_drilldown_member(args: &[Option<Expr>], ctx: &EvalCtx) -> Result<Evaluat
 fn eval_member_function_as_set(
     base: &Expr,
     name: &str,
-    _args: &[Option<Expr>],
+    args: &[Option<Expr>],
     ctx: &EvalCtx,
 ) -> Result<EvaluatedSet, String> {
     match name.to_ascii_lowercase().as_str() {
@@ -593,9 +725,29 @@ fn eval_member_function_as_set(
             };
             all_members_set(ctx, table, hier)
         }
-        other => Err(format!(
-            "unsupported member function in set position: .{other}"
-        )),
+        _other => {
+            // MDX's grammar can't syntactically distinguish a compound
+            // member path's trailing bare-word segment (e.g. a calculated
+            // measure referenced as [Measures].cChildren) from a member
+            // function call — both parse as MemberFunction. If the base is
+            // a Measures-scoped path and there are no call arguments,
+            // resolve it the same way a 2-segment bracketed measure path
+            // would: as that measure's name.
+            if args.is_empty() {
+                if let Expr::Member(path) = base {
+                    if path.is_measure() {
+                        let member = Member::Measure { name: name.to_string() };
+                        return Ok(EvaluatedSet {
+                            shape: vec![HierarchyRef::Measures],
+                            tuples: vec![Tuple { members: vec![member] }],
+                        });
+                    }
+                }
+            }
+            Err(format!(
+                "unsupported member function in set position: .{name}"
+            ))
+        }
     }
 }
 
