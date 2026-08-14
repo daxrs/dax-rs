@@ -15,7 +15,10 @@ const MAX_XMLA_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 mod codec;
 mod handlers;
+mod mdx_tabular;
 mod soap;
+mod tabular;
+mod xml_util;
 
 use crate::mdx::ast::ConditionValue;
 use crate::mdx::{mdx_to_dax, parse_mdx, FromClause, QueryShape};
@@ -303,6 +306,30 @@ async fn xmla_handler(State(state): State<AppState>, headers: HeaderMap, body: B
                 }
                 FromClause::Cube(cube_name) | FromClause::SubqueryCube { cube: cube_name, .. } => {
                     tracing::info!(cube = cube_name.as_str(), "MDX cube query");
+
+                    if matches!(
+                        resolve_response_format(FormatRequest::parse(execute.format()), false),
+                        Ok(ResponseFormat::Tabular)
+                    ) {
+                        let d = execute
+                            .catalog()
+                            .and_then(|c| provider.database(c))
+                            .or_else(|| databases.first().and_then(|m| provider.database(&m.name)));
+                        if let Some(d) = d {
+                            return match d.execute_mdx(stmt) {
+                                Ok((translated, result)) => {
+                                    match mdx_tabular::build_response(&translated, &result) {
+                                        Ok(response) => finish(&response.render(sid).0),
+                                        Err(e) => finish(&handlers::execute_fault(sid, &e).0),
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "mdxtranslator MDX execution failed");
+                                    finish(&handlers::execute_fault(sid, &e).0)
+                                }
+                            };
+                        }
+                    }
 
                     let translation = match mdx_to_dax(&query) {
                         Ok(t) => t,

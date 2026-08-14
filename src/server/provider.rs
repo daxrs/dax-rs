@@ -129,6 +129,12 @@ pub trait DatabaseProvider: Send + Sync {
     fn list_tables(&self) -> Vec<TableMeta>;
     fn list_relationships(&self) -> Vec<RelationshipMeta>;
     fn execute_dax(&self, query: &str) -> Result<Vec<QueryResult>, String>;
+    fn execute_mdx(
+        &self,
+        _mdx: &str,
+    ) -> Result<(crate::mdxtranslator::TranslatedQuery, QueryResult), String> {
+        Err("MDX execution is not supported by this provider".into())
+    }
     fn model_meta(&self) -> ModelMeta {
         ModelMeta::default()
     }

@@ -233,27 +233,34 @@ fn compile_measure_formula(
             if args.is_empty() && name.eq_ignore_ascii_case("count") =>
         {
             let set = compile_set_expr(base, rollup_hierarchies)?;
-            Ok(match set {
-                CompiledSet::ChildrenOfCurrentMember { table, hier } => {
-                    let col = format!("'{table}'[{hier}]");
-                    if rollup_hierarchies.contains(&(table, hier)) {
-                        // ALL(col), not VALUES(col): "children of All" must
-                        // see the hierarchy's full domain regardless of any
-                        // axis-restriction FILTER this same SUMMARIZECOLUMNS
-                        // call applies elsewhere to narrow which rows are
-                        // displayed (see rollup_restriction_filter) — that
-                        // filter is still ambient context for this
-                        // per-group formula, and VALUES() would inherit it.
-                        format!("IF(ISINSCOPE({col}), 0, COUNTROWS(ALL({col})))")
-                    } else {
-                        "0".to_string()
-                    }
-                }
-            })
+            Ok(render_count(set, rollup_hierarchies))
+        }
+        Expr::FunctionCall { name, args } if name.eq_ignore_ascii_case("count") => {
+            let [Some(inner)] = args.as_slice() else {
+                return Err("Count requires exactly one argument".to_string());
+            };
+            let set = compile_set_expr(inner, rollup_hierarchies)?;
+            Ok(render_count(set, rollup_hierarchies))
         }
         other => Err(format!(
             "{other:?} is not a supported calculated-measure formula"
         )),
+    }
+}
+
+fn render_count(set: CompiledSet, rollup_hierarchies: &HashSet<(String, String)>) -> String {
+    match set {
+        CompiledSet::ChildrenOfCurrentMember { table, hier } => {
+            let col = format!("'{table}'[{hier}]");
+            if rollup_hierarchies.contains(&(table, hier)) {
+                format!("IF(ISINSCOPE({col}), 0, COUNTROWS(ALL({col})))")
+            } else {
+                "0".to_string()
+            }
+        }
+        CompiledSet::AllValuesOf { table, hier } => {
+            format!("COUNTROWS(VALUES('{table}'[{hier}]))")
+        }
     }
 }
 
@@ -269,7 +276,14 @@ enum CompiledSet {
     /// form when the hierarchy is rollup-mixed in this query, or a bare `0`
     /// when it isn't (CurrentMember is then always a fixed leaf, whose
     /// children are unconditionally empty in this flat-hierarchy model).
-    ChildrenOfCurrentMember { table: String, hier: String },
+    ChildrenOfCurrentMember {
+        table: String,
+        hier: String,
+    },
+    AllValuesOf {
+        table: String,
+        hier: String,
+    },
 }
 
 fn compile_set_expr(
@@ -277,6 +291,10 @@ fn compile_set_expr(
     rollup_hierarchies: &HashSet<(String, String)>,
 ) -> Result<CompiledSet, String> {
     match expr {
+        Expr::Member(path) => {
+            let (table, hier) = table_hier_of(path)?;
+            Ok(CompiledSet::AllValuesOf { table, hier })
+        }
         Expr::MemberFunction { base, name, args }
             if args.is_empty() && name.eq_ignore_ascii_case("children") =>
         {
@@ -316,7 +334,7 @@ fn compile_set_expr(
     }
 }
 
-fn distinct_measure_names(set: &EvaluatedSet, measure_position: usize) -> Vec<String> {
+pub fn distinct_measure_names(set: &EvaluatedSet, measure_position: usize) -> Vec<String> {
     let mut names: Vec<String> = set
         .tuples
         .iter()

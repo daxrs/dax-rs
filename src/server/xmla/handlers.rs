@@ -10,6 +10,10 @@ use crate::server::provider::{
     ColumnMeta, DatabaseMeta, MeasureMeta, ModelMeta, QueryResult, RelationshipMeta, TableMeta,
 };
 
+use super::xml_util::{
+    execute_xml, make_tabular_schema, rowset, tabular_col, xml_escape_attr, xml_escape_value,
+};
+
 const CATALOG_COMPAT_LEVEL: u32 = 1604;
 const SERVER_VERSION: &str = "17.0.67.18";
 const CUBE_NAME: &str = "Model";
@@ -38,31 +42,6 @@ fn xml_envelope(session_id: Option<&str>, inner: &str) -> String {
     )
 }
 
-fn execute_envelope(session_id: Option<&str>, inner: &str) -> String {
-    let session_header = match session_id {
-        Some(id) => format!(
-            r#"  <soap:Header>
-    <Session xmlns="urn:schemas-microsoft-com:xml-analysis" SessionId="{id}" />
-  </soap:Header>
-"#,
-            id = xml_escape_attr(id),
-        ),
-        None => String::new(),
-    };
-    format!(
-        r#"<?xml version="1.0" encoding="utf-8"?>
-<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
-{session_header}  <soap:Body>
-    <ExecuteResponse xmlns="urn:schemas-microsoft-com:xml-analysis">
-      <return>
-        {inner}
-      </return>
-    </ExecuteResponse>
-  </soap:Body>
-</soap:Envelope>"#
-    )
-}
-
 fn make_schema(columns: &[(&str, &str)]) -> String {
     let has_uuid = columns.iter().any(|(_, t)| *t == "uuid");
     let uuid_def = if has_uuid {
@@ -86,32 +65,6 @@ fn make_schema(columns: &[(&str, &str)]) -> String {
     )
 }
 
-/// Matches real Fabric's column naming: `C0`.."C9" under 10 total columns,
-/// zero-padded to the widest index (`C00`.."C10", etc.) at 10 or more.
-fn tabular_col(i: usize, total: usize) -> String {
-    let width = total.saturating_sub(1).to_string().len().max(1);
-    format!("C{i:0width$}")
-}
-
-fn make_tabular_schema(columns: &[(&str, Option<&str>)]) -> String {
-    let total = columns.len();
-    let cols: String = columns
-        .iter()
-        .enumerate()
-        .map(|(i, (field, typ))| {
-            let type_attr = match typ {
-                Some(t) => format!(r#" type="xsd:{t}""#),
-                None => String::new(),
-            };
-            let name = tabular_col(i, total);
-            format!(r#"<xsd:element sql:field="{field}" name="{name}"{type_attr} minOccurs="0"/>"#)
-        })
-        .collect();
-    format!(
-        r#"<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:sql="urn:schemas-microsoft-com:xml-sql" targetNamespace="urn:schemas-microsoft-com:xml-analysis:rowset" elementFormDefault="qualified"><xsd:element name="root"><xsd:complexType><xsd:sequence minOccurs="0" maxOccurs="unbounded"><xsd:element name="row" type="row" minOccurs="0" maxOccurs="unbounded"/></xsd:sequence></xsd:complexType></xsd:element><xsd:complexType name="row"><xsd:sequence>{cols}</xsd:sequence></xsd:complexType></xsd:schema>"#
-    )
-}
-
 fn make_xmldoc_schema(field_name: &str) -> String {
     format!(
         concat!(
@@ -132,25 +85,8 @@ fn make_xmldoc_schema(field_name: &str) -> String {
 
 const SCHEMA_GENERIC: &str = r###"<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:sql="urn:schemas-microsoft-com:xml-sql" targetNamespace="urn:schemas-microsoft-com:xml-analysis:rowset" elementFormDefault="qualified"><xsd:element name="root"><xsd:complexType><xsd:sequence minOccurs="0" maxOccurs="unbounded"><xsd:element name="row" type="row" minOccurs="0" maxOccurs="unbounded"/></xsd:sequence></xsd:complexType></xsd:element><xsd:complexType name="row"><xsd:sequence><xsd:any namespace="##any" minOccurs="0" maxOccurs="unbounded" processContents="lax"/></xsd:sequence></xsd:complexType></xsd:schema>"###;
 
-fn rowset(schema: &str, inner: &str) -> String {
-    format!(
-        r#"<root xmlns="urn:schemas-microsoft-com:xml-analysis:rowset" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">{schema}{inner}</root>"#
-    )
-}
-
 fn ok_xml(session_id: Option<&str>, body: String) -> (String, Response) {
     let xml = xml_envelope(session_id, &body);
-    let response = (
-        StatusCode::OK,
-        [("Content-Type", "text/xml; charset=utf-8")],
-        xml.clone(),
-    )
-        .into_response();
-    (xml, response)
-}
-
-fn execute_xml(session_id: Option<&str>, body: String) -> (String, Response) {
-    let xml = execute_envelope(session_id, &body);
     let response = (
         StatusCode::OK,
         [("Content-Type", "text/xml; charset=utf-8")],
@@ -2338,25 +2274,11 @@ pub fn execute_mdx_tabular_multi_dim_crossjoin(
     execute_xml(session_id, rowset(&schema, &rows_xml))
 }
 
-fn xml_escape_value(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
 /// Builds a leaf member's unique name: `{hier_uname}.&[{caption}]`, with the
 /// `&` written as the XML entity `&amp;` and `caption` XML-escaped.
 /// `hier_uname` must already be XML-safe.
 fn member_unique_name(hier_uname: &str, caption: &str) -> String {
     format!("{hier_uname}.&amp;[{}]", xml_escape_value(caption))
-}
-
-fn xml_escape_attr(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
 }
 
 fn to_edm_name(s: &str) -> String {
