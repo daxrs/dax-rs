@@ -1,5 +1,7 @@
 use super::ast::Expr;
-use super::eval::{table_hier_of, EvalCtx, EvaluatedSet, HierarchyRef, Member};
+use super::eval::{
+    restriction_filter_clause, table_hier_of, EvalCtx, EvaluatedSet, HierarchyRef, Member,
+};
 use super::slicer::slicer_measure_names;
 use std::collections::HashSet;
 
@@ -93,13 +95,30 @@ pub fn generate_dax(
         format!("SUMMARIZECOLUMNS({})", summarize_args.join(", "))
     };
 
-    let filters = slicer_filters(slicer);
+    let mut filters = slicer_filters(slicer);
+    filters.extend(subquery_restriction_filters(ctx));
     let inner = if filters.is_empty() {
         inner
     } else {
         format!("CALCULATETABLE({inner}, {})", filters.join(", "))
     };
     Ok(format!("EVALUATE {inner}"))
+}
+
+/// Applies every hierarchy restriction a `FROM (SELECT ... FROM [Cube])`
+/// subquery clause established (see `EvalCtx::apply_subquery_restrictions`)
+/// as an additional filter on the outer query - independent of whether that
+/// hierarchy appears as a groupby column here, since a subquery restricts
+/// the whole cube, not just the axes that happen to reference it.
+fn subquery_restriction_filters(ctx: &EvalCtx) -> Vec<String> {
+    ctx.restrictions
+        .iter()
+        .map(|((table, hier), r)| {
+            let mut keys: Vec<String> = r.keys.iter().cloned().collect();
+            keys.sort();
+            restriction_filter_clause(table, hier, &keys, r.has_blank)
+        })
+        .collect()
 }
 
 fn classify_groupby_positions(set: &EvaluatedSet) -> Vec<(usize, bool)> {
@@ -183,22 +202,8 @@ fn rollup_restriction_filter(
     }
 
     keys.sort();
-    let col = format!("'{table}'[{hier}]");
-    let mut clauses = Vec::new();
-    if !keys.is_empty() {
-        let quoted = keys
-            .iter()
-            .map(|k| format!("\"{k}\""))
-            .collect::<Vec<_>>()
-            .join(", ");
-        clauses.push(format!("{col} IN {{{quoted}}}"));
-    }
-    if has_blank {
-        clauses.push(format!("ISBLANK({col})"));
-    }
-    Ok(Some(format!(
-        "FILTER(ALL({col}), {})",
-        clauses.join(" || ")
+    Ok(Some(restriction_filter_clause(
+        table, hier, &keys, has_blank,
     )))
 }
 

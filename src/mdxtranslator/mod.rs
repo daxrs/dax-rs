@@ -53,7 +53,7 @@ pub fn translate_with_axes(
     engine: &crate::engine::Engine,
 ) -> Result<TranslatedQuery, String> {
     let query = ast::parse(mdx).map_err(|e| e.to_string())?;
-    let ctx = eval::EvalCtx::from_query(engine, &query).map_err(|e| e.to_string())?;
+    let mut ctx = eval::EvalCtx::from_query(engine, &query).map_err(|e| e.to_string())?;
     let cube = match query.body {
         ast::QueryBody::Cube(cube) => cube,
         ast::QueryBody::System(_) => {
@@ -62,6 +62,10 @@ pub fn translate_with_axes(
             )
         }
     };
+
+    if let ast::CubeFrom::Subquery(sub) = &cube.from {
+        ctx.apply_subquery_restrictions(sub)?;
+    }
 
     let mut axes = Vec::with_capacity(cube.axes.len());
     let mut combined: Option<eval::EvaluatedSet> = None;

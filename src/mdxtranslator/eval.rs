@@ -2,7 +2,7 @@ use super::ast::{self, Expr, Literal, MemberPath, PathSegment, QuoteStyle, WithI
 use crate::engine::expressions::Value;
 use crate::engine::Engine;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub fn normalize_with_item(
     item: WithItem,
@@ -65,11 +65,24 @@ pub struct EvaluatedSet {
     pub tuples: Vec<Tuple>,
 }
 
+/// A hierarchy restriction established by a `FROM (SELECT ... FROM [Cube])`
+/// subquery clause: the specific leaf keys (and whether a blank/unknown-
+/// member leaf) that hierarchy is limited to for the rest of the outer
+/// query's evaluation. Both `.AllMembers`/`Children`/etc. resolution (via
+/// `resolve_all_members`) and the generated DAX's own filtering (via
+/// `daxgen`) need to see this.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Restriction {
+    pub keys: HashSet<String>,
+    pub has_blank: bool,
+}
+
 pub struct EvalCtx<'a> {
     pub engine: &'a Engine,
     pub named: HashMap<String, Expr>,
     pub measures: HashMap<String, String>,
     pub calculated_members: HashMap<String, Expr>,
+    pub(super) restrictions: HashMap<(String, String), Restriction>,
     cache: RefCell<HashMap<(String, String), Vec<Member>>>,
     filtered_cache: RefCell<HashMap<(String, String, String, String), Vec<Member>>>,
     current_member: RefCell<Vec<Member>>,
@@ -92,6 +105,7 @@ impl<'a> EvalCtx<'a> {
             named: HashMap::new(),
             measures: catalog_measures(engine),
             calculated_members: HashMap::new(),
+            restrictions: HashMap::new(),
             cache: RefCell::new(HashMap::new()),
             filtered_cache: RefCell::new(HashMap::new()),
             current_member: RefCell::new(Vec::new()),
@@ -137,10 +151,37 @@ impl<'a> EvalCtx<'a> {
             named,
             measures,
             calculated_members,
+            restrictions: HashMap::new(),
             cache: RefCell::new(HashMap::new()),
             filtered_cache: RefCell::new(HashMap::new()),
             current_member: RefCell::new(Vec::new()),
         })
+    }
+
+    /// Evaluates a `FROM (SELECT ... FROM [Cube])` subquery clause's axes
+    /// (and its own optional `WHERE`) and records the resulting per-
+    /// hierarchy key restrictions. Must run before any other evaluation
+    /// against this context, so the restrictions are in place from the
+    /// start for `.AllMembers` resolution and the outer query's own axes/
+    /// `WHERE` evaluation alike.
+    pub(super) fn apply_subquery_restrictions(
+        &mut self,
+        sub: &ast::Subquery,
+    ) -> Result<(), String> {
+        for axis in &sub.axes {
+            let set = eval_set(&axis.expr, self)?;
+            for tuple in &set.tuples {
+                for member in &tuple.members {
+                    merge_member_into_restrictions(&mut self.restrictions, member);
+                }
+            }
+        }
+        if let Some(w) = &sub.where_clause {
+            for member in eval_slicer(w, self)? {
+                merge_member_into_restrictions(&mut self.restrictions, &member);
+            }
+        }
+        Ok(())
     }
 
     /// Binds `m` as the current member for its hierarchy for the duration of
@@ -185,7 +226,17 @@ impl<'a> EvalCtx<'a> {
         if let Some(cached) = self.cache.borrow().get(&key) {
             return Ok(cached.clone());
         }
-        let dax = format!("EVALUATE VALUES('{table}'[{hier}])");
+        let dax = match self.restrictions.get(&key) {
+            Some(r) if !r.keys.is_empty() || r.has_blank => {
+                let mut keys: Vec<String> = r.keys.iter().cloned().collect();
+                keys.sort();
+                format!(
+                    "EVALUATE CALCULATETABLE(VALUES('{table}'[{hier}]), {})",
+                    restriction_filter_clause(table, hier, &keys, r.has_blank)
+                )
+            }
+            _ => format!("EVALUATE VALUES('{table}'[{hier}])"),
+        };
         let mut results = self
             .engine
             .evaluate_query(&dax)
@@ -214,12 +265,30 @@ impl<'a> EvalCtx<'a> {
         if let Some(cached) = self.filtered_cache.borrow().get(&key) {
             return Ok(cached.clone());
         }
-        let filter = if filter_key.is_empty() {
+        let mut filters = vec![if filter_key.is_empty() {
             format!("FILTER(ALL('{table}'[{filter_hier}]), ISBLANK('{table}'[{filter_hier}]))")
         } else {
             format!("'{table}'[{filter_hier}] = \"{filter_key}\"")
-        };
-        let dax = format!("EVALUATE CALCULATETABLE(VALUES('{table}'[{hier}]), {filter})");
+        }];
+        // A `FROM (SELECT ...)` subquery restriction on `hier` itself (as
+        // distinct from `filter_hier`, the DrilldownMember parent being
+        // restricted here) must still apply - e.g. DrilldownMember resolving
+        // SubCategory's children under a subquery that already narrowed
+        // SubCategory to specific keys.
+        if let Some(r) = self
+            .restrictions
+            .get(&(table.to_string(), hier.to_string()))
+        {
+            if !r.keys.is_empty() || r.has_blank {
+                let mut keys: Vec<String> = r.keys.iter().cloned().collect();
+                keys.sort();
+                filters.push(restriction_filter_clause(table, hier, &keys, r.has_blank));
+            }
+        }
+        let dax = format!(
+            "EVALUATE CALCULATETABLE(VALUES('{table}'[{hier}]), {})",
+            filters.join(", ")
+        );
         let mut results = self
             .engine
             .evaluate_query(&dax)
@@ -259,6 +328,50 @@ pub fn eval_slicer(where_clause: &Expr, ctx: &EvalCtx) -> Result<Vec<Member>, St
         [] => Err("WHERE clause evaluated to an empty set".to_string()),
         _ => Err("WHERE clause must evaluate to a single tuple".to_string()),
     }
+}
+
+fn merge_member_into_restrictions(
+    restrictions: &mut HashMap<(String, String), Restriction>,
+    member: &Member,
+) {
+    if let Member::Leaf { table, hier, key, .. } = member {
+        let entry = restrictions
+            .entry((table.clone(), hier.clone()))
+            .or_default();
+        if key.is_empty() {
+            entry.has_blank = true;
+        } else {
+            entry.keys.insert(key.clone());
+        }
+    }
+}
+
+/// Builds a `FILTER(ALL(col), col IN {...} || ISBLANK(col))`-shaped DAX
+/// restriction clause limiting a hierarchy to specific leaf keys - shared by
+/// `resolve_all_members`'s subquery-restricted `VALUES()` lookups and
+/// `daxgen`'s rollup/subquery restriction filters. Callers must ensure
+/// `keys` is non-empty or `has_blank` is true; an unrestricted hierarchy
+/// shouldn't call this at all.
+pub(super) fn restriction_filter_clause(
+    table: &str,
+    hier: &str,
+    keys: &[String],
+    has_blank: bool,
+) -> String {
+    let col = format!("'{table}'[{hier}]");
+    let mut clauses = Vec::new();
+    if !keys.is_empty() {
+        let quoted = keys
+            .iter()
+            .map(|k| format!("\"{k}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        clauses.push(format!("{col} IN {{{quoted}}}"));
+    }
+    if has_blank {
+        clauses.push(format!("ISBLANK({col})"));
+    }
+    format!("FILTER(ALL({col}), {})", clauses.join(" || "))
 }
 
 fn table_value_to_leaves(value: Value, table: &str, hier: &str) -> Result<Vec<Member>, String> {
