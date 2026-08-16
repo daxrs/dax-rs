@@ -65,8 +65,6 @@ pub fn generate_dax(
         }
     };
 
-    let has_mixed = groupby_positions.iter().any(|&(_, is_mixed)| is_mixed);
-
     let inner = if groupby_positions.is_empty() {
         format!("ROW({measure_cols})")
     } else {
@@ -91,22 +89,7 @@ pub fn generate_dax(
             }
         }
         summarize_args.push(measure_cols.clone());
-        let summarize = format!("SUMMARIZECOLUMNS({})", summarize_args.join(", "));
-        if has_mixed {
-            let mut select_args: Vec<String> = groupby_positions
-                .iter()
-                .map(|&(i, _)| {
-                    let col = col_ref(i);
-                    format!("\"{col}\", {col}")
-                })
-                .collect();
-            for mi in 0..measure_pairs.len() {
-                select_args.push(format!("\"M{mi}\", [M{mi}]"));
-            }
-            format!("SELECTCOLUMNS({summarize}, {})", select_args.join(", "))
-        } else {
-            summarize
-        }
+        format!("SUMMARIZECOLUMNS({})", summarize_args.join(", "))
     };
 
     let filters = slicer_filters(slicer);
