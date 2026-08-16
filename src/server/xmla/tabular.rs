@@ -2,7 +2,9 @@
 //! adapter — MDX (`mdx_tabular`) or a future direct-DAX one — that needs to
 //! render query results as a flat `urn:...:rowset` response.
 
-use super::xml_util::{execute_xml, make_tabular_schema, rowset, tabular_col, xml_escape_value};
+use super::xml_util::{
+    execute_xml, make_tabular_schema, member_unique_name, rowset, tabular_col, xml_escape_value,
+};
 use axum::response::Response;
 
 struct TabularColumn {
@@ -26,17 +28,6 @@ pub struct DimColumnPlan {
 pub struct MeasureColumnPlan {
     pub name: String,
     pub result_col: usize,
-}
-
-/// A leaf member's XMLA unique name: `{hier_uname}.&[{key}]` — except the
-/// synthesized blank/unknown member (empty key), whose real Fabric-captured
-/// unique name is the bare `{hier_uname}.&` with no brackets at all.
-fn member_unique_name(hier_uname: &str, key: &str) -> String {
-    if key.is_empty() {
-        format!("{hier_uname}.&")
-    } else {
-        format!("{hier_uname}.&[{key}]")
-    }
 }
 
 impl TabularResponse {

@@ -13,8 +13,10 @@ use uuid::Uuid;
 
 const MAX_XMLA_BODY_BYTES: usize = 64 * 1024 * 1024;
 
+mod cellset;
 mod codec;
 mod handlers;
+mod mdx_multidimensional;
 mod mdx_tabular;
 mod soap;
 mod tabular;
@@ -22,6 +24,7 @@ mod xml_util;
 
 use crate::mdx::ast::ConditionValue;
 use crate::mdx::{mdx_to_dax, parse_mdx, FromClause, QueryShape};
+use crate::mdxtranslator::ast::{parse as parse_mdx_new, CubeFrom, QueryBody};
 use codec::XmlaCodec;
 
 use crate::server::{config::ServerConfig, ServerProvider};
@@ -192,6 +195,77 @@ async fn xmla_handler(State(state): State<AppState>, headers: HeaderMap, body: B
 
         let stmt = execute.statement().unwrap_or("");
 
+        // The new mdxtranslator-based pipeline is tried first for cube
+        // queries, independent of whether the old parser can even parse
+        // this statement — it's a stricter, hand-rolled grammar (e.g. it
+        // rejects the literal `.[All]` member + C-style-comment syntax real
+        // Excel GTOPT queries use, which the new pest grammar accepts).
+        // Falls through to the old parser + QueryShape pipeline below for
+        // $system queries (always) and for any cube-query shape the new
+        // pipeline doesn't (yet) support.
+        if let Ok(new_query) = parse_mdx_new(stmt) {
+            if let QueryBody::Cube(cube) = &new_query.body {
+                let cube_name = match &cube.from {
+                    CubeFrom::Cube(name) => name.clone(),
+                    CubeFrom::Subquery(sq) => sq.from.clone(),
+                };
+                tracing::info!(cube = cube_name.as_str(), "MDX cube query (new parser)");
+
+                if matches!(
+                    resolve_response_format(FormatRequest::parse(execute.format()), false),
+                    Ok(ResponseFormat::Tabular)
+                ) {
+                    let d = execute
+                        .catalog()
+                        .and_then(|c| provider.database(c))
+                        .or_else(|| databases.first().and_then(|m| provider.database(&m.name)));
+                    if let Some(d) = d {
+                        return match d.execute_mdx(stmt) {
+                            Ok((translated, result)) => {
+                                match mdx_tabular::build_response(&translated, &result) {
+                                    Ok(response) => finish(&response.render(sid).0),
+                                    Err(e) => finish(&handlers::execute_fault(sid, &e).0),
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "mdxtranslator MDX execution failed");
+                                finish(&handlers::execute_fault(sid, &e).0)
+                            }
+                        };
+                    }
+                }
+
+                if matches!(
+                    resolve_response_format(FormatRequest::parse(execute.format()), false),
+                    Ok(ResponseFormat::Multidimensional)
+                ) {
+                    let d = execute
+                        .catalog()
+                        .and_then(|c| provider.database(c))
+                        .or_else(|| databases.first().and_then(|m| provider.database(&m.name)));
+                    if let Some(d) = &d {
+                        if let Ok((translated, result)) = d.execute_mdx(stmt) {
+                            let meta = d.model_meta();
+                            if let Ok(response) = mdx_multidimensional::build_response(
+                                &translated,
+                                &result,
+                                cube_name.as_str(),
+                                &meta.last_refreshed,
+                                &meta.last_schema_update,
+                            ) {
+                                return finish(&response.render(sid).0);
+                            }
+                        }
+                    }
+                    // Anything the new translator-based path doesn't (yet)
+                    // support — 3+ axes, Measures mixed with a dimension on
+                    // one axis, a failed DAX execution, etc. — falls through
+                    // to the old parser + QueryShape pipeline below.
+                }
+            }
+        }
+
+        tracing::info!(session_id = %session_id, "invoking legacy MDX parser");
         match parse_mdx(stmt) {
             Ok(query) => match &query.from {
                 FromClause::System { table, conditions, .. } => {
@@ -305,31 +379,14 @@ async fn xmla_handler(State(state): State<AppState>, headers: HeaderMap, body: B
                     handlers::render_dmv_result(sid, result).0
                 }
                 FromClause::Cube(cube_name) | FromClause::SubqueryCube { cube: cube_name, .. } => {
-                    tracing::info!(cube = cube_name.as_str(), "MDX cube query");
+                    tracing::info!(cube = cube_name.as_str(), "MDX cube query (old parser)");
 
-                    if matches!(
-                        resolve_response_format(FormatRequest::parse(execute.format()), false),
-                        Ok(ResponseFormat::Tabular)
-                    ) {
-                        let d = execute
-                            .catalog()
-                            .and_then(|c| provider.database(c))
-                            .or_else(|| databases.first().and_then(|m| provider.database(&m.name)));
-                        if let Some(d) = d {
-                            return match d.execute_mdx(stmt) {
-                                Ok((translated, result)) => {
-                                    match mdx_tabular::build_response(&translated, &result) {
-                                        Ok(response) => finish(&response.render(sid).0),
-                                        Err(e) => finish(&handlers::execute_fault(sid, &e).0),
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(error = %e, "mdxtranslator MDX execution failed");
-                                    finish(&handlers::execute_fault(sid, &e).0)
-                                }
-                            };
-                        }
-                    }
+                    // The new translator-based Tabular/Multidimensional dispatch
+                    // was already attempted above, before the old parser ran at
+                    // all. Reaching this arm means either it doesn't (yet)
+                    // support this query's shape (3+ axes, Measures mixed with a
+                    // dimension on one axis, a failed DAX execution, etc.), or
+                    // the new parser itself failed to parse this statement.
 
                     let translation = match mdx_to_dax(&query) {
                         Ok(t) => t,

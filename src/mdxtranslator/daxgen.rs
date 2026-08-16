@@ -1,5 +1,6 @@
 use super::ast::Expr;
 use super::eval::{table_hier_of, EvalCtx, EvaluatedSet, HierarchyRef, Member};
+use super::slicer::slicer_measure_names;
 use std::collections::HashSet;
 
 pub fn generate_dax(
@@ -331,16 +332,6 @@ pub fn distinct_measure_names(set: &EvaluatedSet, measure_position: usize) -> Ve
     names.sort();
     names.dedup();
     names
-}
-
-fn slicer_measure_names(slicer: &[Member]) -> Result<Vec<String>, String> {
-    Ok(slicer
-        .iter()
-        .filter_map(|m| match m {
-            Member::Measure { name } => Some(name.clone()),
-            Member::Leaf { .. } | Member::All { .. } => None,
-        })
-        .collect())
 }
 
 fn slicer_filters(slicer: &[Member]) -> Vec<String> {

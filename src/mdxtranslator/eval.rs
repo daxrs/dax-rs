@@ -404,6 +404,17 @@ pub fn eval_set(expr: &Expr, ctx: &EvalCtx) -> Result<EvaluatedSet, String> {
             Ok(EvaluatedSet { shape: shape.unwrap_or_default(), tuples })
         }
         Expr::Tuple(items) => {
+            // A single-item "tuple" is ambiguous: it's either a genuine
+            // 1-member tuple, or just redundant grouping parens around a
+            // set expression (`{([Table].[Hier].[Hier].AllMembers)}` is
+            // common in tool-generated MDX). Try the set interpretation
+            // first; fall back to the member-tuple one (which also covers
+            // CurrentMember, not set-shaped) if that fails.
+            if let [single] = items.as_slice() {
+                if let Ok(set) = eval_set(single, ctx) {
+                    return Ok(set);
+                }
+            }
             let mut shape = Vec::with_capacity(items.len());
             let mut members = Vec::with_capacity(items.len());
             for item in items {

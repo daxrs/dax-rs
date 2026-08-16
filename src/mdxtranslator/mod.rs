@@ -7,6 +7,7 @@
 pub mod ast;
 pub mod daxgen;
 pub mod eval;
+pub mod slicer;
 
 use pest::iterators::Pairs;
 use pest::Parser;
@@ -31,6 +32,7 @@ pub fn parse_mdx(input: &str) -> Result<Pairs<'_, Rule>, Box<pest::error::Error<
 /// lists) needs this; `daxgen` itself does not.
 pub struct AxisTranslation {
     pub id: ast::AxisId,
+    pub non_empty: bool,
     pub dim_props: Vec<String>,
     pub set: eval::EvaluatedSet,
 }
@@ -38,6 +40,7 @@ pub struct AxisTranslation {
 pub struct TranslatedQuery {
     pub axes: Vec<AxisTranslation>,
     pub slicer: Vec<eval::Member>,
+    pub cell_props: Vec<String>,
     pub dax: String,
 }
 
@@ -68,7 +71,12 @@ pub fn translate_with_axes(
             None => set.clone(),
             Some(acc) => eval::combine_sets(acc, set.clone()),
         });
-        axes.push(AxisTranslation { id: axis.id.clone(), dim_props: axis.dim_props.clone(), set });
+        axes.push(AxisTranslation {
+            id: axis.id.clone(),
+            non_empty: axis.non_empty,
+            dim_props: axis.dim_props.clone(),
+            set,
+        });
     }
 
     let slicer = match &cube.where_clause {
@@ -76,9 +84,11 @@ pub fn translate_with_axes(
         None => Vec::new(),
     };
 
+    let cell_props = cube.cell_props.clone();
+
     let dax = daxgen::generate_dax(combined.as_ref(), &slicer, &ctx)?;
 
-    Ok(TranslatedQuery { axes, slicer, dax })
+    Ok(TranslatedQuery { axes, slicer, cell_props, dax })
 }
 
 /// Parses `mdx`, evaluates every axis and the WHERE slicer, and generates the
