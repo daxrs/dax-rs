@@ -361,12 +361,6 @@ pub fn build_response(
             .iter()
             .any(|h| matches!(h, HierarchyRef::Measures));
         if has_measures {
-            if axis.set.shape.len() != 1 {
-                return Err(
-                    "Format=Multidimensional does not yet support an axis mixing Measures with a dimension"
-                        .to_string(),
-                );
-            }
             if measures_axis_pos.is_some() {
                 return Err(
                     "Format=Multidimensional does not yet support Measures on more than one axis"
@@ -376,11 +370,17 @@ pub fn build_response(
             measures_axis_pos = Some(i);
         }
     }
-    // Classification only: confirms at most one axis carries Measures. Cell
-    // placement below reads the measure straight out of each combined
-    // tuple when an axis carries it; when none does (measures_axis_pos ==
-    // None), every cell falls back to the single WHERE-clause slicer
-    // measure resolved below, matching daxgen's own fallback.
+    // Classification only: confirms at most one axis carries Measures. An
+    // axis may freely crossjoin Measures with a dimension - every function
+    // below (build_hierarchy_infos, cellset_member_from, build_axis's
+    // DisplayInfo heuristic, dim_key/filter_non_empty, the cell-placement
+    // loop) already treats shape positions generically and skips Measures
+    // when building dimension join keys, so no position/axis-exclusivity
+    // assumption needs to hold. Cell placement below reads the measure
+    // straight out of each combined tuple when an axis carries it; when none
+    // does (measures_axis_pos == None), every cell falls back to the single
+    // WHERE-clause slicer measure resolved below, matching daxgen's own
+    // fallback.
     let _measures_axis_pos = measures_axis_pos;
 
     let col_index: HashMap<&str, usize> = result
