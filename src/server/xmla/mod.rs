@@ -195,15 +195,38 @@ async fn xmla_handler(State(state): State<AppState>, headers: HeaderMap, body: B
 
         let stmt = execute.statement().unwrap_or("");
 
-        // The new mdxtranslator-based pipeline is tried first for cube
-        // queries, independent of whether the old parser can even parse
-        // this statement — it's a stricter, hand-rolled grammar (e.g. it
-        // rejects the literal `.[All]` member + C-style-comment syntax real
-        // Excel GTOPT queries use, which the new pest grammar accepts).
-        // Falls through to the old parser + QueryShape pipeline below for
-        // $system queries (always) and for any cube-query shape the new
-        // pipeline doesn't (yet) support.
+        // The new mdxtranslator-based pipeline is tried first, independent of
+        // whether the old parser can even parse this statement — it's a
+        // stricter, hand-rolled grammar (e.g. it rejects the literal
+        // `.[All]` member + C-style-comment syntax real Excel GTOPT queries
+        // use, which the new pest grammar accepts). $system queries are
+        // always fully handled here (dispatch_system_query has no
+        // unsupported shapes to fall through on); cube queries fall through
+        // to the old parser + QueryShape pipeline below for any shape the
+        // new pipeline doesn't (yet) support.
         if let Ok(new_query) = parse_mdx_new(stmt) {
+            if let QueryBody::System(sys) = &new_query.body {
+                tracing::info!(table = sys.table.as_str(), "MDX $system query (new parser)");
+                let params = execute.parameters();
+                let catalog_filter = sys
+                    .conditions
+                    .iter()
+                    .find(|c| c.column.eq_ignore_ascii_case("CATALOG_NAME"))
+                    .map(|c| match &c.value {
+                        crate::mdxtranslator::ast::ConditionValue::Literal(s) => s.clone(),
+                        crate::mdxtranslator::ast::ConditionValue::Param(p) => {
+                            params.get(p).cloned().unwrap_or_default()
+                        }
+                    });
+                return finish(&dispatch_system_query(
+                    sid,
+                    &sys.table,
+                    catalog_filter.as_deref(),
+                    provider,
+                    &databases,
+                    db.as_deref(),
+                ));
+            }
             if let QueryBody::Cube(cube) = &new_query.body {
                 let cube_name = match &cube.from {
                     CubeFrom::Cube(name) => name.clone(),
@@ -269,114 +292,23 @@ async fn xmla_handler(State(state): State<AppState>, headers: HeaderMap, body: B
         match parse_mdx(stmt) {
             Ok(query) => match &query.from {
                 FromClause::System { table, conditions, .. } => {
-                    tracing::debug!(table, "MDX $system query");
-                    let result = match table.to_uppercase().as_str() {
-                        "MDSCHEMA_CUBES" => {
-                            let params = execute.parameters();
-                            let catalog_filter = conditions
-                                .iter()
-                                .find(|c| c.column.eq_ignore_ascii_case("CATALOG_NAME"))
-                                .map(|c| match &c.value {
-                                    ConditionValue::Literal(s) => s.clone(),
-                                    ConditionValue::Param(p) => {
-                                        params.get(p).cloned().unwrap_or_default()
-                                    }
-                                });
-                            let filtered: Vec<_> = match &catalog_filter {
-                                Some(cat) => databases
-                                    .iter()
-                                    .filter(|db| db.name.eq_ignore_ascii_case(cat))
-                                    .cloned()
-                                    .collect(),
-                                None => databases.clone(),
-                            };
-                            handlers::dmv_cubes_rows(&filtered)
-                        }
-                        "DBSCHEMA_CATALOGS" => handlers::dmv_catalogs_rows(&databases),
-                        "MDSCHEMA_MEASURES" => {
-                            let (cat, measures) =
-                                resolve_measures(provider, &databases, db.as_deref());
-                            handlers::dmv_measures_rows(&cat, &measures)
-                        }
-                        "MDSCHEMA_DIMENSIONS" => {
-                            let (cat, _) = resolve_measures(provider, &databases, db.as_deref());
-                            let tables = resolve_tables(provider, &databases, db.as_deref());
-                            handlers::dmv_dimensions_rows(&cat, &tables)
-                        }
-                        "MDSCHEMA_HIERARCHIES" => {
-                            let (cat, _) = resolve_measures(provider, &databases, db.as_deref());
-                            let tables = resolve_tables(provider, &databases, db.as_deref());
-                            return finish(&handlers::dmv_hierarchies(sid, &cat, &tables).0);
-                        }
-                        "MDSCHEMA_LEVELS" => {
-                            let (cat, _) = resolve_measures(provider, &databases, db.as_deref());
-                            let tables = resolve_tables(provider, &databases, db.as_deref());
-                            return finish(&handlers::dmv_levels(sid, &cat, &tables).0);
-                        }
-                        "MDSCHEMA_KPIS" => return finish(&handlers::dmv_kpis(sid).0),
-                        "TMSCHEMA_MODEL" => {
-                            let name = db
-                                .as_deref()
-                                .map(|d| d.name().to_string())
-                                .or_else(|| databases.first().map(|m| m.name.clone()))
-                                .unwrap_or_default();
-                            let meta = db
-                                .as_deref()
-                                .map(|d| d.model_meta())
-                                .or_else(|| {
-                                    databases
-                                        .first()
-                                        .and_then(|m| provider.database(&m.name))
-                                        .map(|d| d.model_meta())
-                                })
-                                .unwrap_or_default();
-                            return finish(&handlers::tmschema_model(sid, &name, &meta).0);
-                        }
-                        "TMSCHEMA_TABLES" => {
-                            let tables = resolve_tables(provider, &databases, db.as_deref());
-                            return finish(&handlers::tmschema_tables(sid, &tables).0);
-                        }
-                        "TMSCHEMA_COLUMNS" => {
-                            let tables = resolve_tables(provider, &databases, db.as_deref());
-                            return finish(&handlers::tmschema_columns(sid, &tables).0);
-                        }
-                        "TMSCHEMA_MEASURES" => {
-                            let (_, measures) =
-                                resolve_measures(provider, &databases, db.as_deref());
-                            let tables = resolve_tables(provider, &databases, db.as_deref());
-                            return finish(&handlers::tmschema_measures(sid, &measures, &tables).0);
-                        }
-                        "TMSCHEMA_RELATIONSHIPS" => {
-                            let relationships =
-                                resolve_relationships(provider, &databases, db.as_deref());
-                            let tables = resolve_tables(provider, &databases, db.as_deref());
-                            return finish(
-                                &handlers::tmschema_relationships(sid, &relationships, &tables).0,
-                            );
-                        }
-                        "TMSCHEMA_PARTITIONS" => {
-                            let tables = resolve_tables(provider, &databases, db.as_deref());
-                            return finish(&handlers::tmschema_partitions(sid, &tables).0);
-                        }
-                        "TMSCHEMA_HIERARCHIES"
-                        | "TMSCHEMA_LEVELS"
-                        | "TMSCHEMA_DATA_SOURCES"
-                        | "TMSCHEMA_ROLES"
-                        | "TMSCHEMA_ROLE_MEMBERSHIPS"
-                        | "TMSCHEMA_KPIS"
-                        | "TMSCHEMA_PERSPECTIVES"
-                        | "TMSCHEMA_ANNOTATIONS" => {
-                            return finish(&handlers::execute_empty_rowset(sid).0);
-                        }
-                        other => {
-                            tracing::warn!(
-                                other,
-                                "unhandled $system table — returning empty rowset"
-                            );
-                            return finish(&handlers::execute_empty_rowset(sid).0);
-                        }
-                    };
-                    handlers::render_dmv_result(sid, result).0
+                    tracing::info!(table, "MDX $system query (old parser)");
+                    let params = execute.parameters();
+                    let catalog_filter = conditions
+                        .iter()
+                        .find(|c| c.column.eq_ignore_ascii_case("CATALOG_NAME"))
+                        .map(|c| match &c.value {
+                            ConditionValue::Literal(s) => s.clone(),
+                            ConditionValue::Param(p) => params.get(p).cloned().unwrap_or_default(),
+                        });
+                    return finish(&dispatch_system_query(
+                        sid,
+                        table,
+                        catalog_filter.as_deref(),
+                        provider,
+                        &databases,
+                        db.as_deref(),
+                    ));
                 }
                 FromClause::Cube(cube_name) | FromClause::SubqueryCube { cube: cube_name, .. } => {
                     tracing::info!(cube = cube_name.as_str(), "MDX cube query (old parser)");
@@ -1483,6 +1415,115 @@ fn resolve_measures(
         return (first.name().to_string(), first.list_measures());
     }
     (String::new(), vec![])
+}
+
+/// Dispatches a `$system.<table>` schema-probe query (MDX's
+/// `SELECT ... FROM $system.<table> WHERE ...` sub-language) to the same
+/// rowset-building handlers the `Discover` SOAP action uses for the
+/// equivalent MDSCHEMA_*/TMSCHEMA_* request types. Shared between the old
+/// parser's `FromClause::System` and the new parser's
+/// `mdxtranslator::ast::QueryBody::System` - both reduce to a table name
+/// plus (for `MDSCHEMA_CUBES` only, the only branch that ever consults a
+/// condition) an already-resolved `CATALOG_NAME` filter value, so neither
+/// parser's own `Condition`/`ConditionValue` type needs to cross this
+/// boundary. `columns` (an explicit `SELECT` list either parser also
+/// captures) is - matching this shared logic's pre-existing behavior -
+/// never applied; the full fixed-schema rowset is always returned.
+fn dispatch_system_query(
+    sid: Option<&str>,
+    table: &str,
+    catalog_filter: Option<&str>,
+    provider: &Arc<dyn ServerProvider>,
+    databases: &[crate::server::provider::DatabaseMeta],
+    db: Option<&dyn crate::server::provider::DatabaseProvider>,
+) -> String {
+    let result = match table.to_uppercase().as_str() {
+        "MDSCHEMA_CUBES" => {
+            let filtered: Vec<_> = match catalog_filter {
+                Some(cat) => databases
+                    .iter()
+                    .filter(|db| db.name.eq_ignore_ascii_case(cat))
+                    .cloned()
+                    .collect(),
+                None => databases.to_vec(),
+            };
+            handlers::dmv_cubes_rows(&filtered)
+        }
+        "DBSCHEMA_CATALOGS" => handlers::dmv_catalogs_rows(databases),
+        "MDSCHEMA_MEASURES" => {
+            let (cat, measures) = resolve_measures(provider, databases, db);
+            handlers::dmv_measures_rows(&cat, &measures)
+        }
+        "MDSCHEMA_DIMENSIONS" => {
+            let (cat, _) = resolve_measures(provider, databases, db);
+            let tables = resolve_tables(provider, databases, db);
+            handlers::dmv_dimensions_rows(&cat, &tables)
+        }
+        "MDSCHEMA_HIERARCHIES" => {
+            let (cat, _) = resolve_measures(provider, databases, db);
+            let tables = resolve_tables(provider, databases, db);
+            return handlers::dmv_hierarchies(sid, &cat, &tables).0;
+        }
+        "MDSCHEMA_LEVELS" => {
+            let (cat, _) = resolve_measures(provider, databases, db);
+            let tables = resolve_tables(provider, databases, db);
+            return handlers::dmv_levels(sid, &cat, &tables).0;
+        }
+        "MDSCHEMA_KPIS" => return handlers::dmv_kpis(sid).0,
+        "TMSCHEMA_MODEL" => {
+            let name = db
+                .map(|d| d.name().to_string())
+                .or_else(|| databases.first().map(|m| m.name.clone()))
+                .unwrap_or_default();
+            let meta = db
+                .map(|d| d.model_meta())
+                .or_else(|| {
+                    databases
+                        .first()
+                        .and_then(|m| provider.database(&m.name))
+                        .map(|d| d.model_meta())
+                })
+                .unwrap_or_default();
+            return handlers::tmschema_model(sid, &name, &meta).0;
+        }
+        "TMSCHEMA_TABLES" => {
+            let tables = resolve_tables(provider, databases, db);
+            return handlers::tmschema_tables(sid, &tables).0;
+        }
+        "TMSCHEMA_COLUMNS" => {
+            let tables = resolve_tables(provider, databases, db);
+            return handlers::tmschema_columns(sid, &tables).0;
+        }
+        "TMSCHEMA_MEASURES" => {
+            let (_, measures) = resolve_measures(provider, databases, db);
+            let tables = resolve_tables(provider, databases, db);
+            return handlers::tmschema_measures(sid, &measures, &tables).0;
+        }
+        "TMSCHEMA_RELATIONSHIPS" => {
+            let relationships = resolve_relationships(provider, databases, db);
+            let tables = resolve_tables(provider, databases, db);
+            return handlers::tmschema_relationships(sid, &relationships, &tables).0;
+        }
+        "TMSCHEMA_PARTITIONS" => {
+            let tables = resolve_tables(provider, databases, db);
+            return handlers::tmschema_partitions(sid, &tables).0;
+        }
+        "TMSCHEMA_HIERARCHIES"
+        | "TMSCHEMA_LEVELS"
+        | "TMSCHEMA_DATA_SOURCES"
+        | "TMSCHEMA_ROLES"
+        | "TMSCHEMA_ROLE_MEMBERSHIPS"
+        | "TMSCHEMA_KPIS"
+        | "TMSCHEMA_PERSPECTIVES"
+        | "TMSCHEMA_ANNOTATIONS" => {
+            return handlers::execute_empty_rowset(sid).0;
+        }
+        other => {
+            tracing::warn!(other, "unhandled $system table — returning empty rowset");
+            return handlers::execute_empty_rowset(sid).0;
+        }
+    };
+    handlers::render_dmv_result(sid, result).0
 }
 
 fn pretty_xml(xml: &str) -> String {
