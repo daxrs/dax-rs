@@ -267,17 +267,27 @@ async fn xmla_handler(State(state): State<AppState>, headers: HeaderMap, body: B
                         .and_then(|c| provider.database(c))
                         .or_else(|| databases.first().and_then(|m| provider.database(&m.name)));
                     if let Some(d) = &d {
-                        if let Ok((translated, result)) = d.execute_mdx(stmt) {
-                            let meta = d.model_meta();
-                            if let Ok(response) = mdx_multidimensional::build_response(
-                                &translated,
-                                &result,
-                                cube_name.as_str(),
-                                &meta.last_refreshed,
-                                &meta.last_schema_update,
-                            ) {
-                                return finish(&response.render(sid).0);
+                        match d.execute_mdx(stmt) {
+                            Ok((translated, result)) => {
+                                let meta = d.model_meta();
+                                match mdx_multidimensional::build_response(
+                                    &translated,
+                                    &result,
+                                    cube_name.as_str(),
+                                    &meta.last_refreshed,
+                                    &meta.last_schema_update,
+                                ) {
+                                    Ok(response) => return finish(&response.render(sid).0),
+                                    Err(e) => tracing::warn!(
+                                        error = %e,
+                                        "mdxtranslator Multidimensional response build failed"
+                                    ),
+                                }
                             }
+                            Err(e) => tracing::warn!(
+                                error = %e,
+                                "mdxtranslator MDX execution failed"
+                            ),
                         }
                     }
                     // Anything the new translator-based path doesn't (yet)
