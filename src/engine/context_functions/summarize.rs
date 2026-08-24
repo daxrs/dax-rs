@@ -791,6 +791,15 @@ fn generate_rollup_subtotals_sc(
 ) -> DaxResult<DataFrame> {
     use std::collections::HashSet;
 
+    let resolved_name = |table: &str, col: &str| -> String {
+        let qualified = TableCol::new(table, col).to_string();
+        if enriched.column(&qualified).is_ok() {
+            qualified
+        } else {
+            col.to_string()
+        }
+    };
+
     for axis in rollup_groups {
         for (_, flag_opt) in axis {
             if let Some(flag_name) = flag_opt {
@@ -806,10 +815,10 @@ fn generate_rollup_subtotals_sc(
         }
     }
 
-    let all_rollup_cols: Vec<(String, String)> = rollup_groups
+    let all_rollup_cols: Vec<String> = rollup_groups
         .iter()
         .flatten()
-        .flat_map(|(cols, _)| cols.iter().cloned())
+        .flat_map(|(cols, _)| cols.iter().map(|(t, c)| resolved_name(t, c)))
         .collect();
 
     let axis_lens: Vec<usize> = rollup_groups.iter().map(|axis| axis.len()).collect();
@@ -830,6 +839,10 @@ fn generate_rollup_subtotals_sc(
             .flat_map(|(axis, &k)| axis[k..].iter().flat_map(|(cols, _)| cols.iter().cloned()))
             .collect();
         let rc_subtotals = rc.with_subtotal_cols(nulled_set.clone());
+        let nulled_col_names: HashSet<String> = nulled_set
+            .iter()
+            .map(|(t, c)| resolved_name(t, c))
+            .collect();
 
         let flag_values: std::collections::HashMap<&str, bool> = rollup_groups
             .iter()
@@ -845,7 +858,7 @@ fn generate_rollup_subtotals_sc(
 
         let effective_col_names: Vec<String> = effective_group_refs
             .iter()
-            .map(|(_, c)| c.clone())
+            .map(|(t, c)| resolved_name(t, c))
             .collect();
 
         let (sub_unique, sub_height) = if effective_col_names.is_empty() {
@@ -870,7 +883,7 @@ fn generate_rollup_subtotals_sc(
                     let key_series = sub_unique
                         .as_ref()
                         .expect("effective_group_refs non-empty means sub_unique is Some")
-                        .column(col_name)
+                        .column(&resolved_name(owning_table, col_name))
                         .expect("col_name was selected into sub_unique")
                         .as_materialized_series();
                     let key_val = key_series
@@ -962,9 +975,7 @@ fn generate_rollup_subtotals_sc(
                     .clone()
                     .with_name(col_name.as_str().into());
                 columns.push(s);
-            } else if all_rollup_cols.iter().any(|(_, c)| c == col_name)
-                && nulled_set.iter().any(|(_, c)| c == col_name)
-            {
+            } else if all_rollup_cols.contains(col_name) && nulled_col_names.contains(col_name) {
                 let dtype = result
                     .column(col_name)
                     .expect("col_name comes from result.get_column_names()")
@@ -1017,6 +1028,15 @@ fn generate_rollup_subtotals(
 ) -> DaxResult<DataFrame> {
     use std::collections::HashSet;
 
+    let resolved_name = |table: &str, col: &str| -> String {
+        let qualified = TableCol::new(table, col).to_string();
+        if enriched.column(&qualified).is_ok() {
+            qualified
+        } else {
+            col.to_string()
+        }
+    };
+
     for (_, flag_opt) in rollup_refs {
         if let Some(flag_name) = flag_opt {
             let flag_col = Column::new_scalar(
@@ -1054,6 +1074,10 @@ fn generate_rollup_subtotals(
             .iter()
             .map(|((t, c), _)| (t.clone(), c.clone()))
             .collect();
+        let nulled_col_names: HashSet<String> = nulled_set
+            .iter()
+            .map(|(t, c)| resolved_name(t, c))
+            .collect();
         let rc_subtotals = rc.with_subtotal_cols(nulled_set);
 
         let flag_values: std::collections::HashMap<&str, bool> = rollup_refs
@@ -1065,7 +1089,7 @@ fn generate_rollup_subtotals(
 
         let effective_col_names: Vec<String> = effective_group_refs
             .iter()
-            .map(|(_, c)| c.clone())
+            .map(|(t, c)| resolved_name(t, c))
             .collect();
 
         let (sub_unique, sub_height) = if effective_col_names.is_empty() {
@@ -1085,7 +1109,7 @@ fn generate_rollup_subtotals(
                     let key_series = sub_unique
                         .as_ref()
                         .expect("effective_group_refs non-empty means sub_unique is Some")
-                        .column(col_name)
+                        .column(&resolved_name(owning_table, col_name))
                         .expect("col_name was selected into sub_unique")
                         .as_materialized_series();
                     let key_val = key_series
@@ -1128,7 +1152,7 @@ fn generate_rollup_subtotals(
                     .clone()
                     .with_name(col_name.as_str().into());
                 columns.push(s);
-            } else if nulled_rollup.iter().any(|((_, c), _)| c == col_name) {
+            } else if nulled_col_names.contains(col_name) {
                 let dtype = result
                     .column(col_name)
                     .expect("col_name comes from result.get_column_names()")
