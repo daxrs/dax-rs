@@ -233,7 +233,7 @@ pub fn build_ast(pairs: Pairs<Rule>) -> Query {
 fn build_select_stmt(pair: Pair<Rule>) -> Query {
     let mut inner = pair.into_inner().peekable();
     let with_items = if inner.peek().map(|p| p.as_rule()) == Some(Rule::with_clause) {
-        build_with_clause(inner.next().unwrap())
+        build_with_clause(inner.next().expect("Already peeked value"))
     } else {
         Vec::new()
     };
