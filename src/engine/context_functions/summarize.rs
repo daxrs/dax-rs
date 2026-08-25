@@ -686,8 +686,13 @@ pub fn eval_summarize_columns(
                 let predicate =
                     make_key_predicate(ctx, col_name, owning_table, key_val, "SUMMARIZECOLUMNS")?;
 
-                if let Some(override_df) = group_fc.table_overrides.get_mut(owning_table) {
-                    let series = override_df
+                if let Some(override_df) = group_fc.table_overrides.get(owning_table) {
+                    let base_df = if override_df.column(col_name).is_ok() {
+                        override_df.clone()
+                    } else {
+                        ctx.get_filtered_df(owning_table, &group_fc, rc)?
+                    };
+                    let series = base_df
                         .column(col_name)
                         .map_err(|_| {
                             DaxError::Eval(format!(
@@ -699,9 +704,12 @@ pub fn eval_summarize_columns(
                         series,
                         std::slice::from_ref(&predicate),
                     )?;
-                    *override_df = override_df.filter(&mask).map_err(|e| {
+                    let filtered = base_df.filter(&mask).map_err(|e| {
                         DaxError::Eval(format!("SUMMARIZECOLUMNS: filter failed: {e}"))
                     })?;
+                    group_fc
+                        .table_overrides
+                        .insert(owning_table.clone(), filtered);
                 } else {
                     group_fc
                         .filters
@@ -897,8 +905,13 @@ fn generate_rollup_subtotals_sc(
                         "SUMMARIZECOLUMNS ROLLUP",
                     )?;
 
-                    if let Some(override_df) = group_fc.table_overrides.get_mut(owning_table) {
-                        let series = override_df
+                    if let Some(override_df) = group_fc.table_overrides.get(owning_table) {
+                        let base_df = if override_df.column(col_name).is_ok() {
+                            override_df.clone()
+                        } else {
+                            ctx.get_filtered_df(owning_table, &group_fc, rc)?
+                        };
+                        let series = base_df
                             .column(col_name)
                             .map_err(|_| DaxError::Eval(format!("SUMMARIZECOLUMNS ROLLUP: column '{col_name}' not found in table override")))?
                             .as_materialized_series();
@@ -906,9 +919,12 @@ fn generate_rollup_subtotals_sc(
                             series,
                             std::slice::from_ref(&predicate),
                         )?;
-                        *override_df = override_df.filter(&mask).map_err(|e| {
+                        let filtered = base_df.filter(&mask).map_err(|e| {
                             DaxError::Eval(format!("SUMMARIZECOLUMNS ROLLUP: filter failed: {e}"))
                         })?;
+                        group_fc
+                            .table_overrides
+                            .insert(owning_table.clone(), filtered);
                     } else {
                         group_fc
                             .filters
