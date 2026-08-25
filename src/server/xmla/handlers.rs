@@ -6213,10 +6213,7 @@ fn build_col_matrix_root(
         ));
     }
 
-    let cell_data;
-    let axes;
-
-    if matrix_on_rows {
+    let (cell_data, axes) = if matrix_on_rows {
         // CrossJoin on ROWS: Axis0 = simple dim (row_axis), Axis1 = NormTupleSet.
         // cell ordinal = simple_idx + n_axis0_members * axis1_pos(col_idx, m)
         let n_axis0_members = (1 + n_row_leaves) as u32;
@@ -6273,9 +6270,8 @@ fn build_col_matrix_root(
             }
         }
         cd.push_str("</ns2:CellData>");
-        cell_data = cd;
 
-        axes = format!(
+        let axes = format!(
             concat!(
                 "<ns2:Axes>",
                 r#"<ns2:Axis name="Axis0"><ns2:Tuples>{a0}</ns2:Tuples></ns2:Axis>"#,
@@ -6286,6 +6282,7 @@ fn build_col_matrix_root(
             a0 = simple_tuples,
             nts = norm_tuple_set,
         );
+        (cd, axes)
     } else {
         // CrossJoin on COLUMNS: Axis0 = NormTupleSet, Axis1 = simple dim (row_axis).
         // cell ordinal = axis0_pos(col_idx, m) + n_axis0_tuples * row_idx
@@ -6343,9 +6340,8 @@ fn build_col_matrix_root(
             }
         }
         cd.push_str("</ns2:CellData>");
-        cell_data = cd;
 
-        axes = format!(
+        let axes = format!(
             concat!(
                 "<ns2:Axes>",
                 r#"<ns2:Axis name="Axis0">{nts}</ns2:Axis>"#,
@@ -6356,7 +6352,8 @@ fn build_col_matrix_root(
             nts = norm_tuple_set,
             a1 = simple_tuples,
         );
-    }
+        (cd, axes)
+    };
 
     format!(
         "<ns2:root>{schema}{olap}{axes}{cell}</ns2:root>",
