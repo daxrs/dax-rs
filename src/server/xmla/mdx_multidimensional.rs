@@ -397,12 +397,11 @@ pub fn build_response(
         Some(pos) => distinct_measure_names(&combined, pos),
         None => slicer_measure_names(&translated.slicer)?,
     };
-    if sorted_measure_names.is_empty() {
-        return Err(
-            "Format=Multidimensional requires Measures on an axis or in the WHERE clause"
-                .to_string(),
-        );
-    }
+    let sorted_measure_names = if sorted_measure_names.is_empty() {
+        vec!["__implicit__".to_string()]
+    } else {
+        sorted_measure_names
+    };
 
     // Every distinct dimension hierarchy across the whole query (both axes),
     // each mapped to its DAX result column - the join key used to match a
