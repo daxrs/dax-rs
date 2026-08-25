@@ -95,6 +95,7 @@ pub fn divide(
     let numerator = match &args[0] {
         Value::Number(n) => *n,
         Value::Integer(i) => *i as f64,
+        Value::Blank => return Ok(Value::Blank),
         other => {
             return Err(DaxError::Type(format!(
                 "DIVIDE expects numbers, got {other:?}"
@@ -104,6 +105,7 @@ pub fn divide(
     let denominator = match &args[1] {
         Value::Number(n) => *n,
         Value::Integer(i) => *i as f64,
+        Value::Blank => 0.0,
         other => {
             return Err(DaxError::Type(format!(
                 "DIVIDE expects numbers, got {other:?}"
