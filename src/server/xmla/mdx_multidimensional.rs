@@ -48,15 +48,13 @@ fn axis_number(id: &AxisId) -> u32 {
     }
 }
 
-fn combined_shape(axes: &[AxisTranslation]) -> Option<EvaluatedSet> {
-    let mut combined: Option<EvaluatedSet> = None;
-    for axis in axes {
-        combined = Some(match combined {
-            None => axis.set.clone(),
-            Some(acc) => combine_sets(acc, axis.set.clone()),
-        });
-    }
-    combined
+fn combined_shape(axes: &[AxisTranslation]) -> EvaluatedSet {
+    let identity = EvaluatedSet {
+        shape: Vec::new(),
+        tuples: vec![Tuple { members: Vec::new() }],
+    };
+    axes.iter()
+        .fold(identity, |acc, axis| combine_sets(acc, axis.set.clone()))
 }
 
 fn hier_uname_of(table: &str, hier: &str) -> String {
@@ -390,8 +388,7 @@ pub fn build_response(
         .map(|(i, (name, _))| (name.as_str(), i))
         .collect();
 
-    let combined =
-        combined_shape(&translated.axes).ok_or_else(|| "no combined axis shape".to_string())?;
+    let combined = combined_shape(&translated.axes);
     let measure_position = combined
         .shape
         .iter()
@@ -489,7 +486,8 @@ pub fn build_response(
             &dim_result_cols,
             &row_by_dim_key,
         ),
-        _ => axis0_full.to_vec(),
+        Some(_) => axis0_full.to_vec(),
+        None => vec![Tuple { members: Vec::new() }],
     };
     let axis1_tuples: Vec<Tuple> = match axes.get(1) {
         Some(a) if a.non_empty => {
