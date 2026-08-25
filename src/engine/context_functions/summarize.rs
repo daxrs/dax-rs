@@ -13,7 +13,7 @@ use crate::engine::ir::operator::{BoundSummarize, BoundSummarizeColumns, Summari
 use crate::engine::row_context::{RowContext, ScalarValue};
 use crate::engine::table_col::TableCol;
 
-use super::relationship::find_join_path;
+use super::relationship::{find_join_path, JoinStep};
 use super::select_unique;
 
 type RollupColumnRefs = Vec<(String, String)>;
@@ -69,6 +69,17 @@ fn append_subtotal_rows(
         .map_err(|e| DaxError::Eval(format!("{fn_name}: vstack failed: {e}")))
 }
 
+type HopKey = (String, String, String, String);
+
+fn hop_key(step: &JoinStep) -> HopKey {
+    (
+        step.left_table.clone(),
+        step.left_col.clone(),
+        step.right_table.clone(),
+        step.right_col.clone(),
+    )
+}
+
 fn enrich_with_foreign_cols(
     df: DataFrame,
     base_table: &str,
@@ -78,37 +89,67 @@ fn enrich_with_foreign_cols(
     rc: &RowContext,
     fn_name: &str,
 ) -> DaxResult<DataFrame> {
-    let mut enriched = df;
-    for (foreign_table, cols_needed) in foreign_cols {
+    let mut paths: Vec<(String, Vec<JoinStep>)> = Vec::with_capacity(foreign_cols.len());
+    for foreign_table in foreign_cols.keys() {
         let path = find_join_path(ctx, rc, base_table, foreign_table)?;
-        for (i, step) in path.iter().enumerate() {
-            let is_last = i == path.len() - 1;
-            let right_df = ctx.get_filtered_df(&step.right_table, fc, rc)?;
+        paths.push((foreign_table.clone(), path));
+    }
+    let max_depth = paths.iter().map(|(_, p)| p.len()).max().unwrap_or(0);
 
-            let mut to_select = vec![step.right_col.clone()];
-            let mut aliases: Vec<(String, String)> = Vec::new();
+    let mut enriched = df;
+    for depth in 0..max_depth {
+        let mut hop_order: Vec<HopKey> = Vec::new();
+        let mut hop_step: HashMap<HopKey, JoinStep> = HashMap::new();
+        let mut hop_select: HashMap<HopKey, Vec<String>> = HashMap::new();
+        let mut hop_aliases: HashMap<HopKey, Vec<(String, String)>> = HashMap::new();
+        let mut hop_needs_right_col_alias: HashMap<HopKey, bool> = HashMap::new();
+
+        for (foreign_table, path) in &paths {
+            let Some(step) = path.get(depth) else {
+                continue;
+            };
+            let is_last = depth == path.len() - 1;
+            let key = hop_key(step);
+
+            let sel = hop_select.entry(key.clone()).or_insert_with(|| {
+                hop_order.push(key.clone());
+                hop_step.insert(key.clone(), step.clone());
+                vec![step.right_col.clone()]
+            });
+
             if is_last {
-                for c in cols_needed {
-                    if !to_select.contains(c) {
-                        to_select.push(c.clone());
+                for c in &foreign_cols[foreign_table] {
+                    if !sel.contains(c) {
+                        sel.push(c.clone());
                     }
-                    aliases.push((c.clone(), TableCol::new(foreign_table, c).to_string()));
+                    hop_aliases
+                        .entry(key.clone())
+                        .or_default()
+                        .push((c.clone(), TableCol::new(foreign_table, c).to_string()));
                 }
             } else {
-                let next_left = &path[i + 1].left_col;
-                if !to_select.contains(next_left) {
-                    to_select.push(next_left.clone());
+                let next_left = &path[depth + 1].left_col;
+                if !sel.contains(next_left) {
+                    sel.push(next_left.clone());
+                }
+                if next_left == &step.right_col && &step.left_col != next_left {
+                    hop_needs_right_col_alias.insert(key.clone(), true);
                 }
             }
+        }
 
+        for key in hop_order {
+            let step = &hop_step[&key];
+            let right_df = ctx.get_filtered_df(&step.right_table, fc, rc)?;
+            let to_select = hop_select.remove(&key).unwrap_or_default();
             let mut right_slim = right_df
                 .select(to_select)
                 .map_err(|e| DaxError::Eval(format!("{fn_name}: select failed: {e}")))?;
 
-            for (orig, alias) in &aliases {
-                if orig == &step.right_col {
+            for (orig, alias) in hop_aliases.remove(&key).unwrap_or_default() {
+                if orig == step.right_col {
                     let dup = right_slim
-                        .column(orig)
+                        .column(&orig)
                         .map_err(|_| {
                             DaxError::Eval(format!("{fn_name}: column '{orig}' not found"))
                         })?
@@ -119,7 +160,7 @@ fn enrich_with_foreign_cols(
                         DaxError::Eval(format!("{fn_name}: with_column failed: {e}"))
                     })?;
                 } else {
-                    right_slim.rename(orig, alias.as_str().into()).ok();
+                    right_slim.rename(&orig, alias.as_str().into()).ok();
                 }
             }
 
@@ -148,12 +189,15 @@ fn enrich_with_foreign_cols(
                 )
                 .map_err(|e| DaxError::Eval(format!("{fn_name}: join failed: {e}")))?;
 
-            if !is_last {
-                let next_left = &path[i + 1].left_col;
+            if hop_needs_right_col_alias
+                .get(&key)
+                .copied()
+                .unwrap_or(false)
+            {
                 let col_names = enriched.get_column_names();
-                if next_left == &step.right_col
-                    && &step.left_col != next_left
-                    && !col_names.iter().any(|n| n.as_str() == next_left.as_str())
+                if !col_names
+                    .iter()
+                    .any(|n| n.as_str() == step.right_col.as_str())
                 {
                     let alias = enriched
                         .column(&step.left_col)
@@ -165,7 +209,7 @@ fn enrich_with_foreign_cols(
                         })?
                         .as_materialized_series()
                         .clone()
-                        .with_name(next_left.as_str().into());
+                        .with_name(step.right_col.as_str().into());
                     enriched.with_column(alias.into()).map_err(|e| {
                         DaxError::Eval(format!("{fn_name}: with_column failed: {e}"))
                     })?;
