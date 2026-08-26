@@ -410,6 +410,13 @@ pub fn build_response(
     let mut dim_result_cols: Vec<DimResultCol> = Vec::new();
     for (i, href) in combined.shape.iter().enumerate() {
         if let HierarchyRef::Dimension { table, hier } = href {
+            let all_all = combined
+                .tuples
+                .iter()
+                .all(|t| matches!(t.members[i], Member::All { .. }));
+            if all_all {
+                continue;
+            }
             let qualified = format!("{table}[{hier}]");
             let value_col = *col_index
                 .get(qualified.as_str())
