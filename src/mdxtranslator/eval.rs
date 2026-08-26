@@ -84,8 +84,19 @@ pub struct EvalCtx<'a> {
     pub calculated_members: HashMap<String, Expr>,
     pub(super) restrictions: HashMap<(String, String), Restriction>,
     cache: RefCell<HashMap<(String, String), Vec<Member>>>,
-    filtered_cache: RefCell<HashMap<(String, String, String, String), Vec<Member>>>,
+    filtered_cache: RefCell<HashMap<FilteredCacheKey, Vec<Member>>>,
     current_member: RefCell<Vec<Member>>,
+}
+
+/// Cache key for `resolve_all_members_filtered`: the members of `hier` on
+/// `table`, filtered to rows where `filter_hier` equals `filter_key` (or, if
+/// `filter_key` is empty, where `filter_hier` is blank).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FilteredCacheKey {
+    table: String,
+    hier: String,
+    filter_hier: String,
+    filter_key: String,
 }
 
 /// RAII guard for a `CurrentMember` binding pushed by `EvalCtx::with_current_member` —
@@ -256,12 +267,12 @@ impl<'a> EvalCtx<'a> {
         filter_hier: &str,
         filter_key: &str,
     ) -> Result<Vec<Member>, String> {
-        let key = (
-            table.to_string(),
-            hier.to_string(),
-            filter_hier.to_string(),
-            filter_key.to_string(),
-        );
+        let key = FilteredCacheKey {
+            table: table.to_string(),
+            hier: hier.to_string(),
+            filter_hier: filter_hier.to_string(),
+            filter_key: filter_key.to_string(),
+        };
         if let Some(cached) = self.filtered_cache.borrow().get(&key) {
             return Ok(cached.clone());
         }
