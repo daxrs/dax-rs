@@ -13,12 +13,16 @@ use uuid::Uuid;
 
 const MAX_XMLA_BODY_BYTES: usize = 64 * 1024 * 1024;
 
+mod cellset;
 mod codec;
 mod handlers;
+mod mdx_multidimensional;
+mod mdx_tabular;
 mod soap;
+mod tabular;
+mod xml_util;
 
-use crate::mdx::ast::ConditionValue;
-use crate::mdx::{mdx_to_dax, parse_mdx, FromClause, QueryShape};
+use crate::mdxtranslator::ast::{parse as parse_mdx, ConditionValue, CubeFrom, QueryBody};
 use codec::XmlaCodec;
 
 use crate::server::{config::ServerConfig, ServerProvider};
@@ -189,939 +193,149 @@ async fn xmla_handler(State(state): State<AppState>, headers: HeaderMap, body: B
 
         let stmt = execute.statement().unwrap_or("");
 
-        match parse_mdx(stmt) {
-            Ok(query) => match &query.from {
-                FromClause::System { table, conditions, .. } => {
-                    tracing::debug!(table, "MDX $system query");
-                    let result = match table.to_uppercase().as_str() {
-                        "MDSCHEMA_CUBES" => {
-                            let params = execute.parameters();
-                            let catalog_filter = conditions
-                                .iter()
-                                .find(|c| c.column.eq_ignore_ascii_case("CATALOG_NAME"))
-                                .map(|c| match &c.value {
-                                    ConditionValue::Literal(s) => s.clone(),
-                                    ConditionValue::Param(p) => {
-                                        params.get(p).cloned().unwrap_or_default()
-                                    }
-                                });
-                            let filtered: Vec<_> = match &catalog_filter {
-                                Some(cat) => databases
-                                    .iter()
-                                    .filter(|db| db.name.eq_ignore_ascii_case(cat))
-                                    .cloned()
-                                    .collect(),
-                                None => databases.clone(),
-                            };
-                            handlers::dmv_cubes_rows(&filtered)
-                        }
-                        "DBSCHEMA_CATALOGS" => handlers::dmv_catalogs_rows(&databases),
-                        "MDSCHEMA_MEASURES" => {
-                            let (cat, measures) =
-                                resolve_measures(provider, &databases, db.as_deref());
-                            handlers::dmv_measures_rows(&cat, &measures)
-                        }
-                        "MDSCHEMA_DIMENSIONS" => {
-                            let (cat, _) = resolve_measures(provider, &databases, db.as_deref());
-                            let tables = resolve_tables(provider, &databases, db.as_deref());
-                            handlers::dmv_dimensions_rows(&cat, &tables)
-                        }
-                        "MDSCHEMA_HIERARCHIES" => {
-                            let (cat, _) = resolve_measures(provider, &databases, db.as_deref());
-                            let tables = resolve_tables(provider, &databases, db.as_deref());
-                            return finish(&handlers::dmv_hierarchies(sid, &cat, &tables).0);
-                        }
-                        "MDSCHEMA_LEVELS" => {
-                            let (cat, _) = resolve_measures(provider, &databases, db.as_deref());
-                            let tables = resolve_tables(provider, &databases, db.as_deref());
-                            return finish(&handlers::dmv_levels(sid, &cat, &tables).0);
-                        }
-                        "MDSCHEMA_KPIS" => return finish(&handlers::dmv_kpis(sid).0),
-                        "TMSCHEMA_MODEL" => {
-                            let name = db
-                                .as_deref()
-                                .map(|d| d.name().to_string())
-                                .or_else(|| databases.first().map(|m| m.name.clone()))
-                                .unwrap_or_default();
-                            let meta = db
-                                .as_deref()
-                                .map(|d| d.model_meta())
-                                .or_else(|| {
-                                    databases
-                                        .first()
-                                        .and_then(|m| provider.database(&m.name))
-                                        .map(|d| d.model_meta())
-                                })
-                                .unwrap_or_default();
-                            return finish(&handlers::tmschema_model(sid, &name, &meta).0);
-                        }
-                        "TMSCHEMA_TABLES" => {
-                            let tables = resolve_tables(provider, &databases, db.as_deref());
-                            return finish(&handlers::tmschema_tables(sid, &tables).0);
-                        }
-                        "TMSCHEMA_COLUMNS" => {
-                            let tables = resolve_tables(provider, &databases, db.as_deref());
-                            return finish(&handlers::tmschema_columns(sid, &tables).0);
-                        }
-                        "TMSCHEMA_MEASURES" => {
-                            let (_, measures) =
-                                resolve_measures(provider, &databases, db.as_deref());
-                            let tables = resolve_tables(provider, &databases, db.as_deref());
-                            return finish(&handlers::tmschema_measures(sid, &measures, &tables).0);
-                        }
-                        "TMSCHEMA_RELATIONSHIPS" => {
-                            let relationships =
-                                resolve_relationships(provider, &databases, db.as_deref());
-                            let tables = resolve_tables(provider, &databases, db.as_deref());
-                            return finish(
-                                &handlers::tmschema_relationships(sid, &relationships, &tables).0,
-                            );
-                        }
-                        "TMSCHEMA_PARTITIONS" => {
-                            let tables = resolve_tables(provider, &databases, db.as_deref());
-                            return finish(&handlers::tmschema_partitions(sid, &tables).0);
-                        }
-                        "TMSCHEMA_HIERARCHIES"
-                        | "TMSCHEMA_LEVELS"
-                        | "TMSCHEMA_DATA_SOURCES"
-                        | "TMSCHEMA_ROLES"
-                        | "TMSCHEMA_ROLE_MEMBERSHIPS"
-                        | "TMSCHEMA_KPIS"
-                        | "TMSCHEMA_PERSPECTIVES"
-                        | "TMSCHEMA_ANNOTATIONS" => {
-                            return finish(&handlers::execute_empty_rowset(sid).0);
-                        }
-                        other => {
-                            tracing::warn!(
-                                other,
-                                "unhandled $system table — returning empty rowset"
-                            );
-                            return finish(&handlers::execute_empty_rowset(sid).0);
-                        }
-                    };
-                    handlers::render_dmv_result(sid, result).0
-                }
-                FromClause::Cube(cube_name) | FromClause::SubqueryCube { cube: cube_name, .. } => {
-                    tracing::info!(cube = cube_name.as_str(), "MDX cube query");
+        if let Ok(query) = parse_mdx(stmt) {
+            if let QueryBody::System(sys) = &query.body {
+                tracing::info!(table = sys.table.as_str(), "MDX $system query");
+                let params = execute.parameters();
+                let catalog_filter = sys
+                    .conditions
+                    .iter()
+                    .find(|c| c.column.eq_ignore_ascii_case("CATALOG_NAME"))
+                    .map(|c| match &c.value {
+                        ConditionValue::Literal(s) => s.clone(),
+                        ConditionValue::Param(p) => params.get(p).cloned().unwrap_or_default(),
+                    });
+                return finish(&dispatch_system_query(
+                    sid,
+                    &sys.table,
+                    catalog_filter.as_deref(),
+                    provider,
+                    &databases,
+                    db.as_deref(),
+                ));
+            }
+            if let QueryBody::Cube(cube) = &query.body {
+                let cube_name = match &cube.from {
+                    CubeFrom::Cube(name) => name.clone(),
+                    CubeFrom::Subquery(sq) => sq.from.clone(),
+                };
+                tracing::info!(cube = cube_name.as_str(), "MDX cube query");
 
-                    let translation = match mdx_to_dax(&query) {
-                        Ok(t) => t,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "MDX translation failed");
-                            return finish(&handlers::execute_empty_rowset(sid).0);
-                        }
-                    };
-
+                if matches!(
+                    resolve_response_format(FormatRequest::parse(execute.format()), false),
+                    Ok(ResponseFormat::Tabular)
+                ) {
                     let d = execute
                         .catalog()
                         .and_then(|c| provider.database(c))
                         .or_else(|| databases.first().and_then(|m| provider.database(&m.name)));
-                    let Some(d) = d else {
-                        return finish(&handlers::execute_empty_rowset(sid).0);
-                    };
-
-                    let meta = d.model_meta();
-                    match resolve_response_format(FormatRequest::parse(execute.format()), false) {
-                        Ok(ResponseFormat::Multidimensional) => {}
-                        Ok(ResponseFormat::Tabular) => match translation.shape {
-                            QueryShape::MeasuresOnly { ref measures } => {
-                                let n = measures.len();
-                                let values: Vec<Option<String>> =
-                                    if let Some(ref dax) = translation.cell_dax {
-                                        match d.execute_dax(dax) {
-                                            Ok(results) => results
-                                                .into_iter()
-                                                .next()
-                                                .and_then(|qr| qr.rows.into_iter().next())
-                                                .map(|row| {
-                                                    (0..n)
-                                                        .map(|i| row.get(i).and_then(|v| v.clone()))
-                                                        .collect()
-                                                })
-                                                .unwrap_or_else(|| vec![None; n]),
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    error = %e,
-                                                    "MDX tabular meas-only eval failed"
-                                                );
-                                                vec![None; n]
-                                            }
-                                        }
-                                    } else {
-                                        vec![None; n]
-                                    };
-                                return finish(
-                                    &handlers::execute_mdx_tabular_measures_only(
-                                        sid, measures, &values,
-                                    )
-                                    .0,
-                                );
-                            }
-                            QueryShape::DimMeasureMatrix { ref dim_axis, ref measures, .. } => {
-                                let n = measures.len();
-                                let cells: Vec<(String, Vec<Option<String>>)> =
-                                    if let Some(ref dax) = translation.cell_dax {
-                                        match d.execute_dax(dax) {
-                                            Ok(results) => results
-                                                .into_iter()
-                                                .next()
-                                                .map(|qr| {
-                                                    qr.rows
-                                                        .into_iter()
-                                                        .filter_map(|row| {
-                                                            let k = row
-                                                                .first()
-                                                                .and_then(|v| v.clone())?;
-                                                            let vals = (0..n)
-                                                                .map(|i| {
-                                                                    row.get(1 + i)
-                                                                        .and_then(|v| v.clone())
-                                                                })
-                                                                .collect();
-                                                            Some((k, vals))
-                                                        })
-                                                        .collect()
-                                                })
-                                                .unwrap_or_default(),
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    error = %e,
-                                                    "MDX tabular dim-measure-matrix failed"
-                                                );
-                                                vec![]
-                                            }
-                                        }
-                                    } else {
-                                        vec![]
-                                    };
-                                return finish(
-                                    &handlers::execute_mdx_tabular_dim_measure(
-                                        sid, dim_axis, measures, &cells,
-                                    )
-                                    .0,
-                                );
-                            }
-                            QueryShape::SingleAxisMultiDimCrossJoin {
-                                ref dims,
-                                ref measures,
-                                ..
-                            } => {
-                                let n_dims = dims.len();
-                                let n_meas = measures.len();
-                                let cells: Vec<Vec<Option<String>>> = if let Some(ref dax) =
-                                    translation.cell_dax
-                                {
-                                    match d.execute_dax(dax) {
-                                        Ok(results) => results
-                                            .into_iter()
-                                            .next()
-                                            .map(|qr| {
-                                                qr.rows
-                                                    .into_iter()
-                                                    .filter_map(|row| {
-                                                        row.first().and_then(|v| v.as_ref())?;
-                                                        let mut combined: Vec<Option<String>> = (0
-                                                            ..n_dims)
-                                                            .map(|i| {
-                                                                row.get(i).and_then(|v| v.clone())
-                                                            })
-                                                            .collect();
-                                                        combined.extend((0..n_meas).map(|i| {
-                                                            row.get(n_dims + i)
-                                                                .and_then(|v| v.clone())
-                                                        }));
-                                                        Some(combined)
-                                                    })
-                                                    .collect()
-                                            })
-                                            .unwrap_or_default(),
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                error = %e,
-                                                "MDX tabular multi-dim crossjoin failed"
-                                            );
-                                            vec![]
-                                        }
-                                    }
-                                } else {
-                                    vec![]
-                                };
-                                return finish(
-                                    &handlers::execute_mdx_tabular_multi_dim_crossjoin(
-                                        sid, dims, measures, &cells,
-                                    )
-                                    .0,
-                                );
-                            }
-                            QueryShape::Scalar { .. }
-                            | QueryShape::SingleAxisCrossJoin { .. }
-                            | QueryShape::CrossJoinMatrix { .. }
-                            | QueryShape::TwoHierWithMeasures { .. }
-                            | QueryShape::TwoDimAxes { .. }
-                            | QueryShape::TwoHierDim { .. }
-                            | QueryShape::SingleDim { .. } => {
-                                return finish(
-                                    &handlers::execute_fault(
-                                        sid,
-                                        "Format=Tabular is not yet implemented for this MDX query shape",
-                                    )
-                                    .0,
-                                );
-                            }
-                        },
-                        Err(e) => return finish(&handlers::execute_fault(sid, &e).0),
-                    }
-                    match translation.shape {
-                        QueryShape::Scalar { .. } => {
-                            let scalar_value: Option<String> = if let Some(ref dax) =
-                                translation.cell_dax
-                            {
-                                match d.execute_dax(dax) {
-                                    Ok(results) => results
-                                        .into_iter()
-                                        .next()
-                                        .and_then(|qr| qr.rows.into_iter().next())
-                                        .and_then(|row| row.into_iter().next().flatten()),
-                                    Err(e) => {
-                                        tracing::warn!(error = %e, "MDX scalar cell_dax failed");
-                                        None
-                                    }
+                    if let Some(d) = d {
+                        return match d.execute_mdx(stmt) {
+                            Ok((translated, result)) => {
+                                match mdx_tabular::build_response(&translated, &result) {
+                                    Ok(response) => finish(&response.render(sid).0),
+                                    Err(e) => finish(&handlers::execute_fault(sid, &e).0),
                                 }
-                            } else {
-                                None
-                            };
-                            return finish(
-                                &handlers::execute_mdx_scalar(
-                                    sid,
-                                    &translation.cube,
-                                    scalar_value.as_deref(),
-                                    &translation.cell_props,
-                                    &meta.last_refreshed,
-                                    &meta.last_schema_update,
-                                )
-                                .0,
-                            );
-                        }
-
-                        QueryShape::MeasuresOnly { ref measures } => {
-                            let n = measures.len();
-                            let values: Vec<Option<String>> = if let Some(ref dax) =
-                                translation.cell_dax
-                            {
-                                match d.execute_dax(dax) {
-                                    Ok(results) => results
-                                        .into_iter()
-                                        .next()
-                                        .and_then(|qr| qr.rows.into_iter().next())
-                                        .map(|row| {
-                                            (0..n)
-                                                .map(|i| row.get(i).and_then(|v| v.clone()))
-                                                .collect()
-                                        })
-                                        .unwrap_or_else(|| vec![None; n]),
-                                    Err(e) => {
-                                        tracing::warn!(error = %e, "MDX meas-only-cols eval failed");
-                                        vec![None; n]
-                                    }
-                                }
-                            } else {
-                                vec![None; n]
-                            };
-                            return finish(
-                                &handlers::execute_mdx_meas_only_cols(
-                                    sid,
-                                    &translation.cube,
-                                    measures,
-                                    &values,
-                                    &translation.cell_props,
-                                    &meta.last_refreshed,
-                                    &meta.last_schema_update,
-                                )
-                                .0,
-                            );
-                        }
-
-                        QueryShape::SingleAxisCrossJoin {
-                            ref dim_axis,
-                            ref measures,
-                            measures_first,
-                        } => {
-                            let n = measures.len();
-                            let has_two_hier = dim_axis.second_hier.is_some();
-                            let cells: Vec<(String, Option<String>, Vec<Option<String>>)> =
-                                if let Some(ref dax) = translation.cell_dax {
-                                    match d.execute_dax(dax) {
-                                        Ok(results) => results
-                                            .into_iter()
-                                            .next()
-                                            .map(|qr| {
-                                                qr.rows
-                                                    .into_iter()
-                                                    .filter_map(|row| {
-                                                        let h1 =
-                                                            row.first().and_then(|v| v.clone())?;
-                                                        if has_two_hier {
-                                                            let h2 =
-                                                                row.get(1).and_then(|v| v.clone());
-                                                            let vals = (0..n)
-                                                                .map(|i| {
-                                                                    row.get(2 + i)
-                                                                        .and_then(|v| v.clone())
-                                                                })
-                                                                .collect();
-                                                            Some((h1, h2, vals))
-                                                        } else {
-                                                            let vals = (0..n)
-                                                                .map(|i| {
-                                                                    row.get(1 + i)
-                                                                        .and_then(|v| v.clone())
-                                                                })
-                                                                .collect();
-                                                            Some((h1, None, vals))
-                                                        }
-                                                    })
-                                                    .collect()
-                                            })
-                                            .unwrap_or_default(),
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, "MDX single-axis crossjoin failed");
-                                            vec![]
-                                        }
-                                    }
-                                } else {
-                                    vec![]
-                                };
-                            return finish(
-                                &handlers::execute_mdx_cellset_single_axis_crossjoin(
-                                    sid,
-                                    &translation.cube,
-                                    dim_axis,
-                                    measures,
-                                    &cells,
-                                    &translation.cell_props,
-                                    &meta.last_refreshed,
-                                    &meta.last_schema_update,
-                                    measures_first,
-                                )
-                                .0,
-                            );
-                        }
-
-                        QueryShape::SingleAxisMultiDimCrossJoin {
-                            ref dims,
-                            ref measures,
-                            measures_position,
-                        } => {
-                            let n_dims = dims.len();
-                            let n_meas = measures.len();
-                            let cells: Vec<Vec<Option<String>>> = if let Some(ref dax) =
-                                translation.cell_dax
-                            {
-                                match d.execute_dax(dax) {
-                                    Ok(results) => results
-                                        .into_iter()
-                                        .next()
-                                        .map(|qr| {
-                                            qr.rows
-                                                .into_iter()
-                                                .filter_map(|row| {
-                                                    row.first().and_then(|v| v.as_ref())?;
-                                                    let mut combined: Vec<Option<String>> = (0
-                                                        ..n_dims)
-                                                        .map(|i| row.get(i).and_then(|v| v.clone()))
-                                                        .collect();
-                                                    combined.extend((0..n_meas).map(|i| {
-                                                        row.get(n_dims + i).and_then(|v| v.clone())
-                                                    }));
-                                                    Some(combined)
-                                                })
-                                                .collect()
-                                        })
-                                        .unwrap_or_default(),
-                                    Err(e) => {
-                                        tracing::warn!(error = %e, "MDX multi-dim crossjoin failed");
-                                        vec![]
-                                    }
-                                }
-                            } else {
-                                vec![]
-                            };
-                            return finish(
-                                &handlers::execute_mdx_cellset_single_axis_multi_dim_crossjoin(
-                                    sid,
-                                    &translation.cube,
-                                    dims,
-                                    measures,
-                                    measures_position,
-                                    &cells,
-                                    &translation.cell_props,
-                                    &meta.last_refreshed,
-                                    &meta.last_schema_update,
-                                )
-                                .0,
-                            );
-                        }
-
-                        QueryShape::CrossJoinMatrix {
-                            ref crossjoin_dim,
-                            ref plain_dim,
-                            ref measures,
-                            measures_first,
-                            crossjoin_on_rows,
-                        } => {
-                            let n = measures.len();
-                            let cells: Vec<(String, String, Vec<Option<String>>)> =
-                                if let Some(ref dax) = translation.cell_dax {
-                                    match d.execute_dax(dax) {
-                                        Ok(results) => results
-                                            .into_iter()
-                                            .next()
-                                            .map(|qr| {
-                                                qr.rows
-                                                    .into_iter()
-                                                    .filter_map(|row| {
-                                                        let c =
-                                                            row.first().and_then(|v| v.clone())?;
-                                                        let r = row
-                                                            .get(1)
-                                                            .and_then(|v| v.clone())
-                                                            .unwrap_or_default();
-                                                        let vals = (0..n)
-                                                            .map(|i| {
-                                                                row.get(2 + i)
-                                                                    .and_then(|v| v.clone())
-                                                            })
-                                                            .collect();
-                                                        Some((c, r, vals))
-                                                    })
-                                                    .collect()
-                                            })
-                                            .unwrap_or_default(),
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, "MDX col-matrix failed");
-                                            vec![]
-                                        }
-                                    }
-                                } else {
-                                    vec![]
-                                };
-                            return finish(
-                                &handlers::execute_mdx_cellset_col_matrix(
-                                    sid,
-                                    &translation.cube,
-                                    crossjoin_dim,
-                                    plain_dim,
-                                    measures,
-                                    &cells,
-                                    &translation.cell_props,
-                                    &meta.last_refreshed,
-                                    &meta.last_schema_update,
-                                    measures_first,
-                                    crossjoin_on_rows,
-                                )
-                                .0,
-                            );
-                        }
-
-                        QueryShape::TwoHierWithMeasures { ref dim_axis, ref measures } => {
-                            let n = measures.len();
-                            let cells: Vec<(String, String, Vec<Option<String>>)> = if let Some(
-                                ref dax,
-                            ) =
-                                translation.cell_dax
-                            {
-                                match d.execute_dax(dax) {
-                                    Ok(results) => results
-                                        .into_iter()
-                                        .next()
-                                        .map(|qr| {
-                                            qr.rows
-                                                .into_iter()
-                                                .filter_map(|row| {
-                                                    let h1 = row.first().and_then(|v| v.clone())?;
-                                                    let h2 = row
-                                                        .get(1)
-                                                        .and_then(|v| v.clone())
-                                                        .unwrap_or_default();
-                                                    let vals = (0..n)
-                                                        .map(|i| {
-                                                            row.get(2 + i).and_then(|v| v.clone())
-                                                        })
-                                                        .collect();
-                                                    Some((h1, h2, vals))
-                                                })
-                                                .collect()
-                                        })
-                                        .unwrap_or_default(),
-                                    Err(e) => {
-                                        tracing::warn!(error = %e, "MDX two-hier-matrix failed");
-                                        vec![]
-                                    }
-                                }
-                            } else {
-                                vec![]
-                            };
-                            return finish(
-                                &handlers::execute_mdx_cellset_matrix(
-                                    sid,
-                                    &translation.cube,
-                                    dim_axis,
-                                    measures,
-                                    &cells,
-                                    &translation.cell_props,
-                                    &meta.last_refreshed,
-                                    &meta.last_schema_update,
-                                )
-                                .0,
-                            );
-                        }
-
-                        QueryShape::DimMeasureMatrix {
-                            ref dim_axis,
-                            ref measures,
-                            measures_on_rows,
-                        } => {
-                            let n = measures.len();
-                            let cells: Vec<(String, Vec<Option<String>>)> = if let Some(ref dax) =
-                                translation.cell_dax
-                            {
-                                match d.execute_dax(dax) {
-                                    Ok(results) => results
-                                        .into_iter()
-                                        .next()
-                                        .map(|qr| {
-                                            qr.rows
-                                                .into_iter()
-                                                .filter_map(|row| {
-                                                    let k = row.first().and_then(|v| v.clone())?;
-                                                    let vals = (0..n)
-                                                        .map(|i| {
-                                                            row.get(1 + i).and_then(|v| v.clone())
-                                                        })
-                                                        .collect();
-                                                    Some((k, vals))
-                                                })
-                                                .collect()
-                                        })
-                                        .unwrap_or_default(),
-                                    Err(e) => {
-                                        tracing::warn!(error = %e, "MDX dim-measure-matrix failed");
-                                        vec![]
-                                    }
-                                }
-                            } else {
-                                vec![]
-                            };
-                            if measures_on_rows {
-                                return finish(
-                                    &handlers::execute_mdx_cellset_meas_on_rows(
-                                        sid,
-                                        &translation.cube,
-                                        dim_axis,
-                                        measures,
-                                        &cells,
-                                        &translation.cell_props,
-                                        &meta.last_refreshed,
-                                        &meta.last_schema_update,
-                                    )
-                                    .0,
-                                );
-                            } else {
-                                return finish(
-                                    &handlers::execute_mdx_cellset_meas_on_cols(
-                                        sid,
-                                        &translation.cube,
-                                        dim_axis,
-                                        measures,
-                                        &cells,
-                                        &translation.cell_props,
-                                        &meta.last_refreshed,
-                                        &meta.last_schema_update,
-                                    )
-                                    .0,
-                                );
                             }
-                        }
-
-                        QueryShape::TwoDimAxes { ref col_axis, ref row_axis, ref measure_name } => {
-                            if measure_name.is_some() {
-                                let cells: Vec<(String, String, Option<String>)> = if let Some(
-                                    ref dax,
-                                ) =
-                                    translation.cell_dax
-                                {
-                                    match d.execute_dax(dax) {
-                                        Ok(results) => results
-                                            .into_iter()
-                                            .next()
-                                            .map(|qr| {
-                                                qr.rows
-                                                    .into_iter()
-                                                    .filter_map(|row| {
-                                                        let c =
-                                                            row.first().and_then(|v| v.clone())?;
-                                                        let r = row
-                                                            .get(1)
-                                                            .and_then(|v| v.clone())
-                                                            .unwrap_or_default();
-                                                        let val =
-                                                            row.get(2).and_then(|v| v.clone());
-                                                        Some((c, r, val))
-                                                    })
-                                                    .collect()
-                                            })
-                                            .unwrap_or_default(),
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, "MDX two-dim-axis-measure failed");
-                                            vec![]
-                                        }
-                                    }
-                                } else {
-                                    vec![]
-                                };
-                                return finish(
-                                    &handlers::execute_mdx_cellset_two_dim_axis_measure(
-                                        sid,
-                                        &translation.cube,
-                                        col_axis,
-                                        row_axis,
-                                        &cells,
-                                        &translation.cell_props,
-                                        &meta.last_refreshed,
-                                        &meta.last_schema_update,
-                                    )
-                                    .0,
-                                );
-                            } else {
-                                let pairs: Vec<(String, String)> = if let Some(ref dax) =
-                                    translation.cell_dax
-                                {
-                                    match d.execute_dax(dax) {
-                                        Ok(results) => results
-                                            .into_iter()
-                                            .next()
-                                            .map(|qr| {
-                                                qr.rows
-                                                    .into_iter()
-                                                    .filter_map(|row| {
-                                                        let c =
-                                                            row.first().and_then(|v| v.clone())?;
-                                                        let r = row
-                                                            .get(1)
-                                                            .and_then(|v| v.clone())
-                                                            .unwrap_or_default();
-                                                        Some((c, r))
-                                                    })
-                                                    .collect()
-                                            })
-                                            .unwrap_or_default(),
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, "MDX two-dim-axis failed");
-                                            vec![]
-                                        }
-                                    }
-                                } else {
-                                    vec![]
-                                };
-                                return finish(
-                                    &handlers::execute_mdx_cellset_two_dim_axis(
-                                        sid,
-                                        &translation.cube,
-                                        col_axis,
-                                        row_axis,
-                                        &pairs,
-                                        &translation.cell_props,
-                                        &meta.last_refreshed,
-                                        &meta.last_schema_update,
-                                    )
-                                    .0,
-                                );
+                            Err(e) => {
+                                tracing::warn!(error = %e, "mdxtranslator MDX execution failed");
+                                finish(&handlers::execute_fault(sid, &e).0)
                             }
-                        }
-
-                        QueryShape::TwoHierDim { ref axis, ref measure_name } => {
-                            let has_measure = measure_name.is_some();
-                            let cells: Vec<(String, String, Option<String>)> =
-                                if let Some(ref dax) = translation.cell_dax {
-                                    match d.execute_dax(dax) {
-                                        Ok(results) => results
-                                            .into_iter()
-                                            .next()
-                                            .map(|qr| {
-                                                qr.rows
-                                                    .into_iter()
-                                                    .filter_map(|row| {
-                                                        let h1 =
-                                                            row.first().and_then(|v| v.clone())?;
-                                                        let h2 = row
-                                                            .get(1)
-                                                            .and_then(|v| v.clone())
-                                                            .unwrap_or_default();
-                                                        let val = if has_measure {
-                                                            row.get(2).and_then(|v| v.clone())
-                                                        } else {
-                                                            None
-                                                        };
-                                                        Some((h1, h2, val))
-                                                    })
-                                                    .collect()
-                                            })
-                                            .unwrap_or_default(),
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, "MDX two-hier failed");
-                                            vec![]
-                                        }
-                                    }
-                                } else {
-                                    vec![]
-                                };
-                            return finish(
-                                &handlers::execute_mdx_cellset_two_hier(
-                                    sid,
-                                    &translation.cube,
-                                    axis,
-                                    &cells,
-                                    &translation.cell_props,
-                                    &meta.last_refreshed,
-                                    &meta.last_schema_update,
-                                )
-                                .0,
-                            );
-                        }
-
-                        QueryShape::SingleDim { ref axis, ref measure_name, has_measure_axis } => {
-                            let total_value: Option<String> =
-                                if let Some(ref dax) = translation.total_dax {
-                                    match d.execute_dax(dax) {
-                                        Ok(results) => results
-                                            .into_iter()
-                                            .next()
-                                            .and_then(|qr| qr.rows.into_iter().next())
-                                            .and_then(|row| row.into_iter().next().flatten()),
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, "MDX total_dax failed");
-                                            None
-                                        }
-                                    }
-                                } else {
-                                    None
-                                };
-                            let leaf_members: Vec<(String, String)> =
-                                if let Some(ref dax) = translation.cell_dax {
-                                    match d.execute_dax(dax) {
-                                        Ok(results) => results
-                                            .into_iter()
-                                            .next()
-                                            .map(|qr| {
-                                                qr.rows
-                                                    .into_iter()
-                                                    .filter_map(|row| {
-                                                        let key =
-                                                            row.first().and_then(|v| v.clone())?;
-                                                        let val = row
-                                                            .get(1)
-                                                            .and_then(|v| v.clone())
-                                                            .unwrap_or_default();
-                                                        if translation.non_empty
-                                                            && measure_name.is_some()
-                                                            && val.is_empty()
-                                                        {
-                                                            return None;
-                                                        }
-                                                        Some((key, val))
-                                                    })
-                                                    .collect()
-                                            })
-                                            .unwrap_or_default(),
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, "MDX cell_dax failed");
-                                            vec![]
-                                        }
-                                    }
-                                } else {
-                                    vec![]
-                                };
-                            return finish(
-                                &handlers::execute_mdx_cellset(
-                                    sid,
-                                    &translation.cube,
-                                    axis,
-                                    measure_name.as_deref(),
-                                    total_value.as_deref(),
-                                    &leaf_members,
-                                    &translation.cell_props,
-                                    &meta.last_refreshed,
-                                    &meta.last_schema_update,
-                                    has_measure_axis,
-                                )
-                                .0,
-                            );
-                        }
-                    }
-
-                    #[allow(unreachable_code)]
-                    handlers::execute_empty_rowset(sid).0
-                }
-            },
-            Err(_) => {
-                if let Some(stmt) = execute.statement() {
-                    let upper = stmt.trim().to_uppercase();
-                    if upper.starts_with("EVALUATE") || upper.starts_with("DEFINE") {
-                        let db = execute
-                            .catalog()
-                            .and_then(|c| provider.database(c))
-                            .or_else(|| databases.first().and_then(|m| provider.database(&m.name)));
-
-                        let Some(d) = db else {
-                            return finish(&handlers::execute_empty_rowset(sid).0);
                         };
+                    }
+                }
 
-                        if let Err(e) =
-                            resolve_response_format(FormatRequest::parse(execute.format()), true)
-                        {
-                            return finish(&handlers::execute_fault(sid, &e).0);
-                        }
-
-                        let cat = d.name().to_string();
-                        let wants_metrics = execute.wants_execution_metrics();
-                        let parse_ms = t_request.elapsed().as_millis() as u64;
-                        let t0 = std::time::Instant::now();
-                        let xml = match d.execute_dax(stmt) {
-                            Ok(qr) => {
-                                let dax_ms = t0.elapsed().as_millis() as u64;
-                                let t_serialize = std::time::Instant::now();
-                                let result = handlers::execute_query_result(
-                                    sid,
-                                    &cat,
-                                    qr,
-                                    wants_metrics.then_some(dax_ms),
-                                )
-                                .0;
-                                let serialize_ms = t_serialize.elapsed().as_millis() as u64;
-                                tracing::info!(
-                                    catalog = %cat,
-                                    parse_ms,
-                                    dax_ms,
-                                    serialize_ms,
-                                    "DAX executed"
-                                );
-                                result
-                            }
+                let d = execute
+                    .catalog()
+                    .and_then(|c| provider.database(c))
+                    .or_else(|| databases.first().and_then(|m| provider.database(&m.name)));
+                let Some(d) = &d else {
+                    return finish(&handlers::execute_empty_rowset(sid).0);
+                };
+                return finish(&match d.execute_mdx(stmt) {
+                    Ok((translated, result)) => {
+                        let meta = d.model_meta();
+                        match mdx_multidimensional::build_response(
+                            &translated,
+                            &result,
+                            cube_name.as_str(),
+                            &meta.last_refreshed,
+                            &meta.last_schema_update,
+                        ) {
+                            Ok(response) => response.render(sid).0,
                             Err(e) => {
                                 tracing::warn!(
                                     error = %e,
-                                    statement = %stmt,
-                                    "DAX execution failed"
+                                    "mdxtranslator Multidimensional response build failed"
                                 );
                                 handlers::execute_fault(sid, &e).0
                             }
-                        };
-                        return finish(&xml);
+                        }
                     }
-                }
-                handlers::execute_ok(sid).0
+                    Err(e) => {
+                        tracing::warn!(error = %e, "mdxtranslator MDX execution failed");
+                        handlers::execute_fault(sid, &e).0
+                    }
+                });
             }
         }
+
+        if let Some(stmt) = execute.statement() {
+            let upper = stmt.trim().to_uppercase();
+            if upper.starts_with("EVALUATE") || upper.starts_with("DEFINE") {
+                let db = execute
+                    .catalog()
+                    .and_then(|c| provider.database(c))
+                    .or_else(|| databases.first().and_then(|m| provider.database(&m.name)));
+
+                let Some(d) = db else {
+                    return finish(&handlers::execute_empty_rowset(sid).0);
+                };
+
+                if let Err(e) =
+                    resolve_response_format(FormatRequest::parse(execute.format()), true)
+                {
+                    return finish(&handlers::execute_fault(sid, &e).0);
+                }
+
+                let cat = d.name().to_string();
+                let wants_metrics = execute.wants_execution_metrics();
+                let parse_ms = t_request.elapsed().as_millis() as u64;
+                let t0 = std::time::Instant::now();
+                let xml = match d.execute_dax(stmt) {
+                    Ok(qr) => {
+                        let dax_ms = t0.elapsed().as_millis() as u64;
+                        let t_serialize = std::time::Instant::now();
+                        let result = handlers::execute_query_result(
+                            sid,
+                            &cat,
+                            qr,
+                            wants_metrics.then_some(dax_ms),
+                        )
+                        .0;
+                        let serialize_ms = t_serialize.elapsed().as_millis() as u64;
+                        tracing::info!(
+                            catalog = %cat,
+                            parse_ms,
+                            dax_ms,
+                            serialize_ms,
+                            "DAX executed"
+                        );
+                        result
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            statement = %stmt,
+                            "DAX execution failed"
+                        );
+                        handlers::execute_fault(sid, &e).0
+                    }
+                };
+                return finish(&xml);
+            }
+        }
+        handlers::execute_ok(sid).0
     } else if let Some(discover) = &envelope.body.discover {
         let request_type = discover.request_type.as_str();
         tracing::debug!(request_type, session_id = %session_id, "Discover request");
@@ -1399,6 +613,115 @@ fn resolve_measures(
         return (first.name().to_string(), first.list_measures());
     }
     (String::new(), vec![])
+}
+
+/// Dispatches a `$system.<table>` schema-probe query (MDX's
+/// `SELECT ... FROM $system.<table> WHERE ...` sub-language) to the same
+/// rowset-building handlers the `Discover` SOAP action uses for the
+/// equivalent MDSCHEMA_*/TMSCHEMA_* request types. Shared between the old
+/// parser's `FromClause::System` and the new parser's
+/// `mdxtranslator::ast::QueryBody::System` - both reduce to a table name
+/// plus (for `MDSCHEMA_CUBES` only, the only branch that ever consults a
+/// condition) an already-resolved `CATALOG_NAME` filter value, so neither
+/// parser's own `Condition`/`ConditionValue` type needs to cross this
+/// boundary. `columns` (an explicit `SELECT` list either parser also
+/// captures) is - matching this shared logic's pre-existing behavior -
+/// never applied; the full fixed-schema rowset is always returned.
+fn dispatch_system_query(
+    sid: Option<&str>,
+    table: &str,
+    catalog_filter: Option<&str>,
+    provider: &Arc<dyn ServerProvider>,
+    databases: &[crate::server::provider::DatabaseMeta],
+    db: Option<&dyn crate::server::provider::DatabaseProvider>,
+) -> String {
+    let result = match table.to_uppercase().as_str() {
+        "MDSCHEMA_CUBES" => {
+            let filtered: Vec<_> = match catalog_filter {
+                Some(cat) => databases
+                    .iter()
+                    .filter(|db| db.name.eq_ignore_ascii_case(cat))
+                    .cloned()
+                    .collect(),
+                None => databases.to_vec(),
+            };
+            handlers::dmv_cubes_rows(&filtered)
+        }
+        "DBSCHEMA_CATALOGS" => handlers::dmv_catalogs_rows(databases),
+        "MDSCHEMA_MEASURES" => {
+            let (cat, measures) = resolve_measures(provider, databases, db);
+            handlers::dmv_measures_rows(&cat, &measures)
+        }
+        "MDSCHEMA_DIMENSIONS" => {
+            let (cat, _) = resolve_measures(provider, databases, db);
+            let tables = resolve_tables(provider, databases, db);
+            handlers::dmv_dimensions_rows(&cat, &tables)
+        }
+        "MDSCHEMA_HIERARCHIES" => {
+            let (cat, _) = resolve_measures(provider, databases, db);
+            let tables = resolve_tables(provider, databases, db);
+            return handlers::dmv_hierarchies(sid, &cat, &tables).0;
+        }
+        "MDSCHEMA_LEVELS" => {
+            let (cat, _) = resolve_measures(provider, databases, db);
+            let tables = resolve_tables(provider, databases, db);
+            return handlers::dmv_levels(sid, &cat, &tables).0;
+        }
+        "MDSCHEMA_KPIS" => return handlers::dmv_kpis(sid).0,
+        "TMSCHEMA_MODEL" => {
+            let name = db
+                .map(|d| d.name().to_string())
+                .or_else(|| databases.first().map(|m| m.name.clone()))
+                .unwrap_or_default();
+            let meta = db
+                .map(|d| d.model_meta())
+                .or_else(|| {
+                    databases
+                        .first()
+                        .and_then(|m| provider.database(&m.name))
+                        .map(|d| d.model_meta())
+                })
+                .unwrap_or_default();
+            return handlers::tmschema_model(sid, &name, &meta).0;
+        }
+        "TMSCHEMA_TABLES" => {
+            let tables = resolve_tables(provider, databases, db);
+            return handlers::tmschema_tables(sid, &tables).0;
+        }
+        "TMSCHEMA_COLUMNS" => {
+            let tables = resolve_tables(provider, databases, db);
+            return handlers::tmschema_columns(sid, &tables).0;
+        }
+        "TMSCHEMA_MEASURES" => {
+            let (_, measures) = resolve_measures(provider, databases, db);
+            let tables = resolve_tables(provider, databases, db);
+            return handlers::tmschema_measures(sid, &measures, &tables).0;
+        }
+        "TMSCHEMA_RELATIONSHIPS" => {
+            let relationships = resolve_relationships(provider, databases, db);
+            let tables = resolve_tables(provider, databases, db);
+            return handlers::tmschema_relationships(sid, &relationships, &tables).0;
+        }
+        "TMSCHEMA_PARTITIONS" => {
+            let tables = resolve_tables(provider, databases, db);
+            return handlers::tmschema_partitions(sid, &tables).0;
+        }
+        "TMSCHEMA_HIERARCHIES"
+        | "TMSCHEMA_LEVELS"
+        | "TMSCHEMA_DATA_SOURCES"
+        | "TMSCHEMA_ROLES"
+        | "TMSCHEMA_ROLE_MEMBERSHIPS"
+        | "TMSCHEMA_KPIS"
+        | "TMSCHEMA_PERSPECTIVES"
+        | "TMSCHEMA_ANNOTATIONS" => {
+            return handlers::execute_empty_rowset(sid).0;
+        }
+        other => {
+            tracing::warn!(other, "unhandled $system table — returning empty rowset");
+            return handlers::execute_empty_rowset(sid).0;
+        }
+    };
+    handlers::render_dmv_result(sid, result).0
 }
 
 fn pretty_xml(xml: &str) -> String {

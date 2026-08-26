@@ -364,6 +364,21 @@ impl DatabaseProvider for DaxDatabaseProvider {
 
         result?.into_iter().map(value_to_query_result).collect()
     }
+
+    fn execute_mdx(
+        &self,
+        mdx: &str,
+    ) -> Result<(crate::mdxtranslator::TranslatedQuery, QueryResult), String> {
+        let translated = {
+            let engine = self.read_engine();
+            crate::mdxtranslator::translate_with_axes(mdx, &engine)?
+        };
+        let mut results = self.execute_dax(&translated.dax)?;
+        let result = results
+            .pop()
+            .ok_or_else(|| "no result for generated DAX".to_string())?;
+        Ok((translated, result))
+    }
 }
 
 fn run_commands(catalog: &mut Catalog, commands: &[Command]) -> (usize, Vec<CommandError>) {
