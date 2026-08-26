@@ -849,6 +849,27 @@ fn eval_member_function_as_set(
             };
             all_members_set(ctx, table, hier)
         }
+        "defaultmember" => {
+            let Expr::Member(path) = base else {
+                return Err("DefaultMember requires a member base".to_string());
+            };
+            if !path.is_measure() {
+                return Err("DefaultMember is only supported on the Measures hierarchy".to_string());
+            }
+            let default_name = ctx
+                .engine
+                .ctx()
+                .catalog
+                .measure_order
+                .first()
+                .ok_or_else(|| "DefaultMember: model has no measures".to_string())?
+                .clone();
+            let member = Member::Measure { name: default_name };
+            Ok(EvaluatedSet {
+                shape: vec![HierarchyRef::Measures],
+                tuples: vec![Tuple { members: vec![member] }],
+            })
+        }
         _other => {
             // MDX's grammar can't syntactically distinguish a compound
             // member path's trailing bare-word segment (e.g. a calculated
