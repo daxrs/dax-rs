@@ -1,7 +1,4 @@
-//! A from-scratch MDX translator, built independently of `crate::mdx`.
-//!
-//! `crate::mdx` remains the production parser/translator and is untouched by
-//! this module. `mdxtranslator` starts from a general MDX grammar (see
+//! The MDX-to-DAX translator: parses MDX against a general grammar (see
 //! `mdx.pest`) rather than a fixed set of recognized query shapes.
 
 pub mod ast;
