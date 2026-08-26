@@ -26,15 +26,6 @@ pub fn generate_dax(
         }
     };
 
-    let rollup_hierarchies: HashSet<(String, String)> = groupby_positions
-        .iter()
-        .filter(|&&(_, is_mixed)| is_mixed)
-        .filter_map(|&(i, _)| match &shape[i] {
-            HierarchyRef::Dimension { table, hier } => Some((table.clone(), hier.clone())),
-            HierarchyRef::Measures => None,
-        })
-        .collect();
-
     let measure_pairs: Vec<(String, String)> = if measure_names.is_empty() {
         vec![("__implicit__".to_string(), "1".to_string())]
     } else {
@@ -44,7 +35,7 @@ pub fn generate_dax(
             let dax = if let Some(dax) = ctx.measures.get(&key) {
                 dax.clone()
             } else if let Some(expr) = ctx.calculated_members.get(&key) {
-                compile_measure_formula(expr, &rollup_hierarchies)?
+                compile_measure_formula(expr)?
             } else {
                 return Err(format!("unknown measure: {name}"));
             };
@@ -208,28 +199,22 @@ fn rollup_restriction_filter(
 }
 
 /// Compiles a calculated-member scalar formula (a `WITH MEMBER` body) into
-/// DAX text, given which hierarchies in the current combined axis shape are
-/// rollup-mixed (so member-navigation functions know whether CurrentMember
-/// can be at the collapsed/All position — DAX's ISINSCOPE — or is always a
-/// fixed leaf). A small compositional compiler over the same Expr AST
-/// eval_set uses for axis-set expressions, not a per-formula pattern match.
-fn compile_measure_formula(
-    expr: &Expr,
-    rollup_hierarchies: &HashSet<(String, String)>,
-) -> Result<String, String> {
+/// DAX text. A small compositional compiler over the same Expr AST eval_set
+/// uses for axis-set expressions, not a per-formula pattern match.
+fn compile_measure_formula(expr: &Expr) -> Result<String, String> {
     match expr {
         Expr::MemberFunction { base, name, args }
             if args.is_empty() && name.eq_ignore_ascii_case("count") =>
         {
-            let set = compile_set_expr(base, rollup_hierarchies)?;
-            Ok(render_count(set, rollup_hierarchies))
+            let set = compile_set_expr(base)?;
+            Ok(render_count(set))
         }
         Expr::FunctionCall { name, args } if name.eq_ignore_ascii_case("count") => {
             let [Some(inner)] = args.as_slice() else {
                 return Err("Count requires exactly one argument".to_string());
             };
-            let set = compile_set_expr(inner, rollup_hierarchies)?;
-            Ok(render_count(set, rollup_hierarchies))
+            let set = compile_set_expr(inner)?;
+            Ok(render_count(set))
         }
         other => Err(format!(
             "{other:?} is not a supported calculated-measure formula"
@@ -237,15 +222,11 @@ fn compile_measure_formula(
     }
 }
 
-fn render_count(set: CompiledSet, rollup_hierarchies: &HashSet<(String, String)>) -> String {
+fn render_count(set: CompiledSet) -> String {
     match set {
         CompiledSet::ChildrenOfCurrentMember { table, hier } => {
             let col = format!("'{table}'[{hier}]");
-            if rollup_hierarchies.contains(&(table, hier)) {
-                format!("IF(ISINSCOPE({col}), 0, COUNTROWS(ALL({col})))")
-            } else {
-                "0".to_string()
-            }
+            format!("IF(ISINSCOPE({col}), 0, COUNTROWS(ALL({col})))")
         }
         CompiledSet::AllValuesOf { table, hier } => {
             format!("COUNTROWS(VALUES('{table}'[{hier}]))")
@@ -261,10 +242,13 @@ enum CompiledSet {
     /// The children of `CurrentMember` for `(table, hier)`: empty when
     /// CurrentMember is at the leaf level, every leaf value when it's at
     /// the collapsed/All level — matching DAX's ISINSCOPE distinction
-    /// exactly, so `.Count` of this compiles to the ISINSCOPE-conditional
-    /// form when the hierarchy is rollup-mixed in this query, or a bare `0`
-    /// when it isn't (CurrentMember is then always a fixed leaf, whose
-    /// children are unconditionally empty in this flat-hierarchy model).
+    /// exactly (`IF(ISINSCOPE(col), 0, COUNTROWS(ALL(col)))`), unconditionally,
+    /// regardless of whether `hier` is rollup-mixed in this query. Confirmed
+    /// against real Fabric (tools/FabricValidator) that ISINSCOPE alone
+    /// already distinguishes all three cases correctly: true for every row
+    /// of a plain (non-rollup) groupby column (a real fixed leaf → 0), and
+    /// false when `hier` isn't grouped at all (CurrentMember fixed at the
+    /// All level → the real child count, not 0).
     ChildrenOfCurrentMember {
         table: String,
         hier: String,
@@ -275,10 +259,7 @@ enum CompiledSet {
     },
 }
 
-fn compile_set_expr(
-    expr: &Expr,
-    rollup_hierarchies: &HashSet<(String, String)>,
-) -> Result<CompiledSet, String> {
+fn compile_set_expr(expr: &Expr) -> Result<CompiledSet, String> {
     match expr {
         Expr::Member(path) => {
             let (table, hier) = table_hier_of(path)?;
@@ -315,7 +296,7 @@ fn compile_set_expr(
             // in this model, so this is an identity passthrough — the same
             // semantics eval_add_calculated_members already applies for
             // axis-set position.
-            compile_set_expr(inner, rollup_hierarchies)
+            compile_set_expr(inner)
         }
         other => Err(format!(
             "{other:?} is not a supported set expression in a calculated-measure formula"
