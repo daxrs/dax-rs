@@ -431,7 +431,17 @@ async fn run_commands(
     let Some(db) = state.provider.database(&id) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    Json(db.apply_commands(&req.commands, req.dry_run)).into_response()
+    // apply_commands saves the model through opendal's blocking operator, which
+    // panics on a thread that drives the Tokio runtime — run it like
+    // refresh_data and reload_model do.
+    match tokio::task::spawn_blocking(move || db.apply_commands(&req.commands, req.dry_run)).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("commands task failed: {e}") })),
+        )
+            .into_response(),
+    }
 }
 
 async fn refresh_data(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
