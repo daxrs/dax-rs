@@ -311,7 +311,7 @@ fn serialize_crossfilter<S: serde::Serializer>(v: &bool, s: S) -> Result<S::Ok, 
     s.serialize_str(if *v { "both" } else { "single" })
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DaxDataType {
     Automatic,
     String,
@@ -325,9 +325,24 @@ pub enum DaxDataType {
     Variant,
 }
 
-impl Serialize for DaxDataType {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(match self {
+impl DaxDataType {
+    /// Every variant. Keep in sync with the enum.
+    const ALL: [DaxDataType; 10] = [
+        DaxDataType::Automatic,
+        DaxDataType::String,
+        DaxDataType::Int64,
+        DaxDataType::Double,
+        DaxDataType::DateTime,
+        DaxDataType::Decimal,
+        DaxDataType::Boolean,
+        DaxDataType::Binary,
+        DaxDataType::Unknown,
+        DaxDataType::Variant,
+    ];
+
+    /// The name as written in TMSL (camelCase, as in the TMSL schema).
+    pub fn tmsl_name(&self) -> &'static str {
+        match self {
             DaxDataType::Automatic => "automatic",
             DaxDataType::String => "string",
             DaxDataType::Int64 => "int64",
@@ -338,23 +353,93 @@ impl Serialize for DaxDataType {
             DaxDataType::Binary => "binary",
             DaxDataType::Unknown => "unknown",
             DaxDataType::Variant => "variant",
+        }
+    }
+
+    /// Case-insensitive: "int64", "Int64" and "INT64" are the same type.
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|t| t.tmsl_name().eq_ignore_ascii_case(name))
+    }
+}
+
+impl Serialize for DaxDataType {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.tmsl_name())
+    }
+}
+
+// Not derived: the derive only accepts the Rust variant names ("Int64"), but
+// Serialize writes the TMSL names ("int64"), so a saved model couldn't be read
+// back. Accepting both spellings reads existing files and saved ones.
+impl<'de> Deserialize<'de> for DaxDataType {
+    fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        Self::parse(&name).ok_or_else(|| {
+            const EXPECTED: &[&str] = &[
+                "automatic",
+                "string",
+                "int64",
+                "double",
+                "dateTime",
+                "decimal",
+                "boolean",
+                "binary",
+                "unknown",
+                "variant",
+            ];
+            de::Error::unknown_variant(&name, EXPECTED)
         })
     }
 }
 
 impl From<&str> for DaxDataType {
     fn from(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "string" => DaxDataType::String,
-            "int64" => DaxDataType::Int64,
-            "double" => DaxDataType::Double,
-            "datetime" => DaxDataType::DateTime,
-            "decimal" => DaxDataType::Decimal,
-            "boolean" => DaxDataType::Boolean,
-            "binary" => DaxDataType::Binary,
-            "variant" => DaxDataType::Variant,
-            "automatic" => DaxDataType::Automatic,
-            _ => DaxDataType::Unknown,
+        Self::parse(s).unwrap_or(DaxDataType::Unknown)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DaxDataType;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn every_data_type_survives_saving_and_loading() -> TestResult {
+        for data_type in DaxDataType::ALL {
+            let json = serde_json::to_string(&data_type)?;
+            let back: DaxDataType = serde_json::from_str(&json)?;
+            assert_eq!(back, data_type, "round trip of {json}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn data_types_are_read_case_insensitively() -> TestResult {
+        for (json, expected) in [
+            ("\"int64\"", DaxDataType::Int64),
+            ("\"Int64\"", DaxDataType::Int64),
+            ("\"INT64\"", DaxDataType::Int64),
+            ("\"string\"", DaxDataType::String),
+            ("\"String\"", DaxDataType::String),
+            ("\"dateTime\"", DaxDataType::DateTime),
+            ("\"DateTime\"", DaxDataType::DateTime),
+            ("\"double\"", DaxDataType::Double),
+        ] {
+            let parsed: DaxDataType = serde_json::from_str(json)?;
+            assert_eq!(parsed, expected, "{json}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_data_type_names_are_rejected() {
+        let result = serde_json::from_str::<DaxDataType>("\"int32\"");
+        assert!(
+            matches!(&result, Err(e) if e.to_string().contains("int32")),
+            "expected an error naming 'int32', got {result:?}"
+        );
     }
 }
