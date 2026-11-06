@@ -231,7 +231,13 @@ impl DatabaseProvider for DaxDatabaseProvider {
             }
         }
 
-        self.write_engine().ctx_mut().catalog = catalog;
+        let mut engine = self.write_engine();
+        engine.ctx_mut().catalog = catalog;
+        // Tables and columns added by these commands have no data yet; give
+        // them empty tables so they can be queried before the next restart.
+        if let Err(e) = engine.ctx_mut().sync_tables_without_data() {
+            tracing::warn!(model = %self.name, error = %e, "could not rebuild tables without data");
+        }
         CommandResponse { dry_run: false, applied, errors }
     }
 

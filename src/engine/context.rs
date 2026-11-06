@@ -477,6 +477,56 @@ pub fn validate_table_schema(
     Ok(())
 }
 
+/// A table without a data source (e.g. made with the CreateTable command) has
+/// an empty path; it's loaded as an empty table instead of reading a file.
+fn has_data_source(path: &str) -> bool {
+    !path.trim().is_empty()
+}
+
+/// An empty frame with the catalog's columns for `table`, in column order and
+/// with the catalog's types.
+fn empty_table(table: &str, catalog: &Catalog) -> Result<DataFrame, String> {
+    let names = catalog
+        .column_order
+        .get(table)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut columns = Vec::with_capacity(names.len());
+    for name in names {
+        let Some(meta) = catalog.columns.get(&(table.to_string(), name.clone())) else {
+            return Err(format!(
+                "Table '{table}': column '{name}' is listed but has no definition in the model"
+            ));
+        };
+        columns.push(Column::new_empty(name.as_str().into(), &meta.dtype));
+    }
+    DataFrame::new_infer_height(columns)
+        .map_err(|e| format!("Table '{table}': failed to build an empty table: {e}"))
+}
+
+/// Loads one table: from its parquet file, or as an empty table when it has
+/// no data source. `blank_member` appends the blank-member row.
+fn load_table(
+    op: &BlockingOperator,
+    table: &str,
+    path: &str,
+    catalog: &Catalog,
+    blank_member: bool,
+) -> Result<DataFrame, String> {
+    let mut df = if has_data_source(path) {
+        let mut df = load_parquet(op, table, path)?;
+        validate_table_schema(&df, table, catalog)?;
+        cast_columns(&mut df, table, &catalog.columns)?;
+        df
+    } else {
+        empty_table(table, catalog)?
+    };
+    if blank_member {
+        df = append_blank_member_row(df)?;
+    }
+    Ok(df)
+}
+
 fn load_parquet(op: &BlockingOperator, table: &str, path: &str) -> Result<DataFrame, String> {
     let bytes = op
         .read(path)
@@ -528,12 +578,8 @@ impl ExecutionContext {
         let mut tables = HashMap::new();
 
         for (table, path) in &catalog.data_sources {
-            let mut df = load_parquet(&datasets_op, table, path)?;
-            validate_table_schema(&df, table, &catalog)?;
-            cast_columns(&mut df, table, &catalog.columns)?;
-            if catalog.relationships.iter().any(|r| r.to_table == *table) {
-                df = append_blank_member_row(df)?;
-            }
+            let blank_member = catalog.relationships.iter().any(|r| r.to_table == *table);
+            let df = load_table(&datasets_op, table, path, &catalog, blank_member)?;
             tables.insert(table.clone(), df);
         }
 
@@ -552,22 +598,44 @@ impl ExecutionContext {
         let mut new_tables: HashMap<String, DataFrame> = HashMap::new();
 
         for (table, path) in &self.catalog.data_sources {
-            let mut df = load_parquet(&self.datasets_op, table, path)?;
-            validate_table_schema(&df, table, &self.catalog)?;
-            cast_columns(&mut df, table, &self.catalog.columns)?;
-            if self
+            let blank_member = self
                 .catalog
                 .relationships
                 .iter()
-                .any(|r| r.from_table == *table)
-            {
-                df = append_blank_member_row(df)?;
-            }
+                .any(|r| r.from_table == *table);
+            let df = load_table(&self.datasets_op, table, path, &self.catalog, blank_member)?;
             new_tables.insert(table.clone(), df);
         }
 
         self.tables = new_tables;
         self.catalog.last_refreshed = chrono::Utc::now();
+        Ok(())
+    }
+
+    /// Rebuilds the empty tables for every table without a data source, so
+    /// tables and columns added by commands can be queried straight away.
+    /// Tables with a data source are left as they are.
+    pub fn sync_tables_without_data(&mut self) -> Result<(), String> {
+        let tables: Vec<String> = self
+            .catalog
+            .data_sources
+            .iter()
+            .filter(|(_, path)| !has_data_source(path))
+            .map(|(table, _)| table.clone())
+            .collect();
+        for table in tables {
+            // Same blank-member rule as try_new.
+            let blank_member = self
+                .catalog
+                .relationships
+                .iter()
+                .any(|r| r.to_table == table);
+            let mut df = empty_table(&table, &self.catalog)?;
+            if blank_member {
+                df = append_blank_member_row(df)?;
+            }
+            self.tables.insert(table, df);
+        }
         Ok(())
     }
 
