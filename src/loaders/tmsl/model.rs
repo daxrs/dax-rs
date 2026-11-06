@@ -134,7 +134,9 @@ pub struct TmslModel {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Table {
     pub name: String,
-    #[serde(rename = "dataSource")]
+    /// Empty (or missing) means the table has no data and is loaded as an
+    /// empty table, e.g. a table made with the CreateTable command.
+    #[serde(rename = "dataSource", default)]
     pub data_source: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<Column>,
