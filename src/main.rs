@@ -38,6 +38,11 @@ async fn main() {
 
     let timezone = args.config.timezone.clone();
 
+    // Kept for creating databases at runtime (POST /models).
+    let storage_models_op = Arc::clone(&models_op);
+    let storage_datasets_op = Arc::clone(&datasets_op);
+    let storage_timezone = timezone.clone();
+
     let db_providers: Vec<DaxDatabaseProvider> = tokio::task::spawn_blocking(move || {
         let mut files: Vec<String> = models_op
             .list("/")
@@ -49,7 +54,7 @@ async fn main() {
         files.sort();
 
         if files.is_empty() {
-            panic!("No model files found in the models storage");
+            tracing::warn!("no model files found in the models storage; create one with POST /models");
         }
 
         let entries: Vec<(String, Arc<opendal::blocking::Operator>)> =
@@ -121,6 +126,10 @@ async fn main() {
     .await
     .expect("model-loading task panicked");
 
-    let provider = Arc::new(DaxServerProvider::new(db_providers));
+    let provider = Arc::new(DaxServerProvider::new(db_providers).with_storage(
+        storage_models_op,
+        storage_datasets_op,
+        storage_timezone,
+    ));
     server::run(provider, args.config).await;
 }

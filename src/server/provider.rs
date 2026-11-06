@@ -95,6 +95,73 @@ impl Default for ModelMeta {
 pub trait ServerProvider: Send + Sync {
     fn list_databases(&self) -> Vec<DatabaseMeta>;
     fn database(&self, name: &str) -> Option<Arc<dyn DatabaseProvider>>;
+
+    /// Creates an empty database (a model with no tables), stores it, and makes
+    /// it available straight away. Blocking: call it from `spawn_blocking`.
+    fn create_database(&self, name: &str) -> Result<DatabaseMeta, CreateDatabaseError> {
+        let _ = name;
+        Err(CreateDatabaseError::NotSupported)
+    }
+}
+
+/// Why `ServerProvider::create_database` failed.
+#[derive(Debug)]
+pub enum CreateDatabaseError {
+    /// The name breaks the naming rule (see `validate_database_name`).
+    InvalidName(String),
+    /// A database with this name (case-insensitive), or its file, already exists.
+    AlreadyExists(String),
+    /// This server has no models storage to create databases in.
+    NotSupported,
+    /// Writing or loading the new model file failed.
+    Storage(String),
+}
+
+impl std::fmt::Display for CreateDatabaseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CreateDatabaseError::InvalidName(message) => write!(f, "invalid name: {message}"),
+            CreateDatabaseError::AlreadyExists(message) => write!(f, "{message}"),
+            CreateDatabaseError::NotSupported => {
+                write!(
+                    f,
+                    "this server has no models storage to create databases in"
+                )
+            }
+            CreateDatabaseError::Storage(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for CreateDatabaseError {}
+
+/// Longest allowed database name, in characters.
+pub const MAX_DATABASE_NAME_LEN: usize = 100;
+
+/// A database name is also its file name in the models storage, so it's kept
+/// to characters that are safe on every storage back-end: 1–100 letters,
+/// digits, spaces, `_` and `-`, with no space at the start or end.
+pub fn validate_database_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("the name is empty".into());
+    }
+    if name.chars().count() > MAX_DATABASE_NAME_LEN {
+        return Err(format!(
+            "the name is longer than {MAX_DATABASE_NAME_LEN} characters"
+        ));
+    }
+    if name.starts_with(' ') || name.ends_with(' ') {
+        return Err("the name starts or ends with a space".into());
+    }
+    if let Some(bad) = name
+        .chars()
+        .find(|c| !(c.is_alphanumeric() || matches!(c, ' ' | '_' | '-')))
+    {
+        return Err(format!(
+            "'{bad}' is not allowed; use letters, digits, spaces, '_' and '-'"
+        ));
+    }
+    Ok(())
 }
 
 pub struct ColumnRef {
