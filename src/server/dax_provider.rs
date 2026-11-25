@@ -634,43 +634,166 @@ fn polars_type_to_xsd(dt: &DataType) -> &'static str {
     }
 }
 
-use crate::server::provider::{DatabaseMeta, ServerProvider};
+use crate::loaders::tmsl::model::TmslModel;
+use crate::server::provider::{
+    validate_database_name, CreateDatabaseError, DatabaseMeta, ServerProvider,
+};
 
 pub struct DaxServerProvider {
-    databases: Vec<Arc<dyn DatabaseProvider>>,
+    /// Grows when a database is created at runtime.
+    databases: RwLock<Vec<Arc<dyn DatabaseProvider>>>,
+    /// Where new databases are written; `None` means creating isn't supported.
+    storage: Option<DatabaseStorage>,
+}
+
+/// What's needed to create a database the same way start-up loads one.
+struct DatabaseStorage {
+    models_op: Arc<BlockingOperator>,
+    datasets_op: Arc<BlockingOperator>,
+    timezone: Option<String>,
 }
 
 impl DaxServerProvider {
     pub fn new(databases: Vec<DaxDatabaseProvider>) -> Self {
         Self {
-            databases: databases
-                .into_iter()
-                .map(|d| -> Arc<dyn DatabaseProvider> { Arc::new(d) })
-                .collect(),
+            databases: RwLock::new(
+                databases
+                    .into_iter()
+                    .map(|d| -> Arc<dyn DatabaseProvider> { Arc::new(d) })
+                    .collect(),
+            ),
+            storage: None,
         }
+    }
+
+    /// Enables `create_database`: new model files are written to `models_op`
+    /// and their data is read from `datasets_op`, like the models loaded at
+    /// start-up.
+    pub fn with_storage(
+        mut self,
+        models_op: Arc<BlockingOperator>,
+        datasets_op: Arc<BlockingOperator>,
+        timezone: Option<String>,
+    ) -> Self {
+        self.storage = Some(DatabaseStorage { models_op, datasets_op, timezone });
+        self
+    }
+
+    fn read_databases(&self) -> std::sync::RwLockReadGuard<'_, Vec<Arc<dyn DatabaseProvider>>> {
+        self.databases
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn write_databases(&self) -> std::sync::RwLockWriteGuard<'_, Vec<Arc<dyn DatabaseProvider>>> {
+        self.databases
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+fn database_meta(db: &dyn DatabaseProvider) -> DatabaseMeta {
+    let meta = db.model_meta();
+    DatabaseMeta {
+        id: db.name().to_string(),
+        name: db.name().to_string(),
+        last_schema_update: meta.last_schema_update,
+        last_refreshed: meta.last_refreshed,
     }
 }
 
 impl ServerProvider for DaxServerProvider {
     fn list_databases(&self) -> Vec<DatabaseMeta> {
-        self.databases
+        self.read_databases()
             .iter()
-            .map(|db| {
-                let meta = db.model_meta();
-                DatabaseMeta {
-                    id: db.name().to_string(),
-                    name: db.name().to_string(),
-                    last_schema_update: meta.last_schema_update,
-                    last_refreshed: meta.last_refreshed,
-                }
-            })
+            .map(|db| database_meta(db.as_ref()))
             .collect()
     }
 
     fn database(&self, name: &str) -> Option<Arc<dyn DatabaseProvider>> {
-        self.databases
+        self.read_databases()
             .iter()
             .find(|db| db.name().eq_ignore_ascii_case(name))
             .cloned()
+    }
+
+    fn create_database(&self, name: &str) -> Result<DatabaseMeta, CreateDatabaseError> {
+        validate_database_name(name).map_err(CreateDatabaseError::InvalidName)?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or(CreateDatabaseError::NotSupported)?;
+
+        // Held until the new database is in the list, so two requests for the
+        // same name can't both succeed.
+        let mut databases = self.write_databases();
+
+        if databases
+            .iter()
+            .any(|db| db.name().eq_ignore_ascii_case(name))
+        {
+            return Err(CreateDatabaseError::AlreadyExists(format!(
+                "a database named '{name}' already exists"
+            )));
+        }
+
+        let path = format!("{name}.json");
+        match storage.models_op.exists(&path) {
+            Ok(false) => {}
+            Ok(true) => {
+                return Err(CreateDatabaseError::AlreadyExists(format!(
+                    "the file '{path}' already exists in the models storage"
+                )))
+            }
+            Err(e) => {
+                return Err(CreateDatabaseError::Storage(format!(
+                    "could not check whether '{path}' exists: {e}"
+                )))
+            }
+        }
+
+        let model = TmslModel {
+            name: Some(name.to_string()),
+            tables: Vec::new(),
+            relationships: Vec::new(),
+            culture: None,
+            collation: None,
+            compatibility_level: None,
+            default_mode: None,
+        };
+        let json = serde_json::to_string_pretty(&model).map_err(|e| {
+            CreateDatabaseError::Storage(format!("could not serialise the new model: {e}"))
+        })?;
+        storage
+            .models_op
+            .write(&path, json.into_bytes())
+            .map_err(|e| CreateDatabaseError::Storage(format!("could not write '{path}': {e}")))?;
+
+        // Load it back exactly like start-up does, so a file the server couldn't
+        // load at the next start is caught now.
+        let mut engine =
+            match Engine::from_storage(&storage.models_op, &path, Arc::clone(&storage.datasets_op))
+            {
+                Ok(engine) => engine,
+                Err(e) => {
+                    let _ = storage.models_op.delete(&path);
+                    return Err(CreateDatabaseError::Storage(format!(
+                        "the new model file '{path}' could not be loaded: {e}"
+                    )));
+                }
+            };
+        // An invalid timezone was already reported at start-up; like there, the
+        // model then uses the system's local timezone.
+        let _ = engine.set_timezone(storage.timezone.as_deref());
+        engine.warmup();
+
+        let db: Arc<dyn DatabaseProvider> = Arc::new(
+            DaxDatabaseProvider::new(name, engine)
+                .with_catalogs_storage(Arc::clone(&storage.models_op), &path),
+        );
+        let meta = database_meta(db.as_ref());
+        databases.push(db);
+        tracing::info!(model = %name, path = %path, "database created");
+        Ok(meta)
     }
 }

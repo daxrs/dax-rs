@@ -3,15 +3,17 @@ pub(crate) mod lineage;
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::server::provider::{ColumnMeta, MeasureMeta, RelationshipMeta, TableMeta};
+use crate::server::provider::{
+    ColumnMeta, CreateDatabaseError, MeasureMeta, RelationshipMeta, TableMeta,
+};
 use crate::server::ServerProvider;
 use commands::CommandRequest;
 
@@ -22,7 +24,7 @@ struct AppState {
 
 pub fn routes(provider: Arc<dyn ServerProvider>) -> Router {
     Router::new()
-        .route("/models", get(list_models))
+        .route("/models", get(list_models).post(create_model))
         .route("/models/{id}", get(get_model))
         .route("/models/{id}/tables", get(list_tables))
         .route("/models/{id}/tables/{table_id}", get(get_table))
@@ -187,6 +189,62 @@ async fn list_models(State(state): State<AppState>) -> Json<Vec<ModelSummary>> {
             .map(|db| ModelSummary { id: db.name.clone(), name: db.name })
             .collect(),
     )
+}
+
+#[derive(Deserialize)]
+struct CreateModelRequest {
+    name: String,
+}
+
+/// POST /models — creates an empty model (database) and returns it like
+/// `GET /models` does: 201 Created, or 400 / 409 / 501 / 500 with `{"error"}`.
+async fn create_model(
+    State(state): State<AppState>,
+    Json(req): Json<CreateModelRequest>,
+) -> impl IntoResponse {
+    let provider = Arc::clone(&state.provider);
+    // Writing and loading the model file uses blocking storage calls.
+    let result = tokio::task::spawn_blocking(move || provider.create_database(&req.name)).await;
+
+    match result {
+        Ok(Ok(db)) => (
+            StatusCode::CREATED,
+            [(
+                header::LOCATION,
+                format!("/models/{}", percent_encode_path_segment(&db.id)),
+            )],
+            Json(ModelSummary { id: db.id, name: db.name }),
+        )
+            .into_response(),
+        Ok(Err(e)) => {
+            let status = match &e {
+                CreateDatabaseError::InvalidName(_) => StatusCode::BAD_REQUEST,
+                CreateDatabaseError::AlreadyExists(_) => StatusCode::CONFLICT,
+                CreateDatabaseError::NotSupported => StatusCode::NOT_IMPLEMENTED,
+                CreateDatabaseError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("create task failed: {e}") })),
+        )
+            .into_response(),
+    }
+}
+
+/// Percent-encodes everything except ASCII letters, digits, `-` and `_`, so a
+/// name with spaces or non-ASCII letters is a valid URL path segment.
+fn percent_encode_path_segment(segment: &str) -> String {
+    let mut encoded = String::with_capacity(segment.len());
+    for byte in segment.bytes() {
+        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 async fn get_model(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {

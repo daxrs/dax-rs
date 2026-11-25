@@ -4,7 +4,7 @@ description: "Inspect and edit model schema over REST — tables, columns, relat
 weight: 5
 icon: "verified_user"
 status: "Latest Release"
-lastUpdated: "August 2026"
+lastUpdated: "November 2026"
 ---
 
 Base URL: `http://localhost:3000`
@@ -38,6 +38,61 @@ Returns all loaded models.
 
 ---
 
+### Create model
+
+```
+POST /models
+```
+
+Creates an empty model — no tables, measures or relationships — and makes it available straight away, both here and over XMLA. It's saved as `{name}.json` in the models storage, so it's loaded again at the next start. Add tables, columns and measures with [`POST /models/{id}/commands`](#run-commands).
+
+**Request body**
+
+```json
+{
+  "name": "Finance"
+}
+```
+
+| Field  | Description                                                                |
+|--------|----------------------------------------------------------------------------|
+| `name` | The model name, which is also its ID and its file name. 1–100 characters: letters, digits, spaces, `_` and `-`, and it can't start or end with a space |
+
+**Response `201 Created`** — the new model, in the same form as `GET /models`. The `Location` header points to it, e.g. `/models/Finance` (percent-encoded, so `Sales Data` becomes `/models/Sales%20Data`).
+
+```json
+{
+  "id": "Finance",
+  "name": "Finance"
+}
+```
+
+**Response `400 Bad Request`**
+
+Returned when the name breaks the naming rule:
+
+```json
+{ "error": "invalid name: '/' is not allowed; use letters, digits, spaces, '_' and '-'" }
+```
+
+A request body that isn't valid JSON is also rejected with `400`, with a plain-text message.
+
+**Response `409 Conflict`** — a model with this name already exists (names are compared case-insensitively), or `{name}.json` already exists in the models storage.
+
+**Response `415 Unsupported Media Type`** — the `Content-Type` header isn't `application/json`; plain-text message.
+
+**Response `422 Unprocessable Entity`** — the request body is JSON but has no `name`, or `name` isn't a string; plain-text message.
+
+**Response `500 Internal Server Error`** — writing or loading the new model file failed.
+
+**Response `501 Not Implemented`** — the server has no models storage to create models in.
+
+The JSON error responses (`400` for an invalid name, `409`, `500`, `501`) have the body `{"error": "…"}`.
+
+The server also starts with an empty models storage now; it logs a warning and waits for models to be created this way.
+
+---
+
 ### Get model
 
 ```
@@ -49,8 +104,8 @@ Returns metadata for a single model.
 **Path parameters**
 
 | Parameter | Description |
-|---|---|
-| `id` | Model name |
+|-----------|-------------|
+| `id`      | Model name  |
 
 **Response `200 OK`**
 
@@ -87,8 +142,8 @@ Returns all tables in the model, each with their full column list.
 **Path parameters**
 
 | Parameter | Description |
-|---|---|
-| `id` | Model name |
+|-----------|-------------|
+| `id`      | Model name  |
 
 **Response `200 OK`**
 
@@ -137,9 +192,9 @@ Returns a single table with its full column list.
 **Path parameters**
 
 | Parameter | Description |
-|---|---|
-| `id` | Model name |
-| `tableId` | Table name |
+|-----------|-------------|
+| `id`      | Model name  |
+| `tableId` | Table name  |
 
 **Response `200 OK`** — same shape as a single entry from [List tables](#list-tables).
 
