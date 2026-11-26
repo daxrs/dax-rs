@@ -304,6 +304,11 @@ impl FunctionRegistry {
             crate::engine::functions::datetime::weeknum_fn,
             IntSmall,
         );
+        reg.register(
+            "DATEVALUE",
+            crate::engine::functions::datetime::datevalue_fn,
+            DateTime,
+        );
 
         reg.register("PI", crate::engine::functions::math::pi_fn, Float);
         reg.register("SQRT", crate::engine::functions::math::sqrt_fn, Float);
@@ -811,6 +816,13 @@ impl FunctionRegistry {
                     opt
                 )
             ]
+        );
+
+        m!(
+            "DATEVALUE",
+            "DATETIME",
+            "Converts a date in the form of text to a date in datetime format.",
+            [p!("dateText", "A text string representing a date.")]
         );
 
         // Math

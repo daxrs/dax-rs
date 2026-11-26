@@ -449,3 +449,115 @@ pub fn datediff_fn(
     };
     Ok(Value::Number(diff as f64))
 }
+
+pub fn datevalue_fn(
+    args: Vec<Value>,
+    ctx: &ExecutionContext,
+    _fc: &FilterContext,
+    _rc: &RowContext,
+) -> DaxResult<Value> {
+    match &args[0] {
+        Value::String(s) => {
+            let culture = ctx.catalog.culture.as_deref().unwrap_or("en-US");
+            Ok(Value::DateTime(parse_date_text(s, culture)?))
+        }
+        Value::Blank => Ok(Value::Blank),
+        other => Err(DaxError::Type(format!(
+            "DATEVALUE: expected text, got {other:?}"
+        ))),
+    }
+}
+
+fn parse_date_text(text: &str, culture: &str) -> DaxResult<i64> {
+    const ISO: [&str; 2] = ["%Y-%m-%d", "%Y/%m/%d"];
+    const NAMED: [&str; 4] = ["%d %B %Y", "%d %b %Y", "%B %d, %Y", "%b %d, %Y"];
+    const MONTH_FIRST: [&str; 1] = ["%m/%d/%Y"];
+    const DAY_FIRST: [&str; 3] = ["%d/%m/%Y", "%d.%m.%Y", "%d-%m-%Y"];
+    let numeric: &[&str] = if culture.eq_ignore_ascii_case("en-US") {
+        &MONTH_FIRST
+    } else {
+        &DAY_FIRST
+    };
+    let text = text.trim();
+    let date_only = text.split(['T', ' ']).next().unwrap_or(text);
+    [text, date_only]
+        .iter()
+        .flat_map(|candidate| {
+            ISO.iter()
+                .chain(numeric)
+                .chain(&NAMED)
+                .map(move |fmt| chrono::NaiveDate::parse_from_str(candidate, fmt))
+        })
+        .find_map(Result::ok)
+        .map(|d| {
+            d.and_time(chrono::NaiveTime::MIN)
+                .and_utc()
+                .timestamp_millis()
+        })
+        .ok_or_else(|| {
+            DaxError::InvalidArgument(format!("DATEVALUE: cannot parse '{text}' as a date"))
+        })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_date_text_accepts_supported_formats() {
+        let expected = ymd_to_ms(2009, 8, 1);
+        for text in [
+            "2009-08-01",
+            "2009/8/1",
+            "8/1/2009",
+            "1 August 2009",
+            "1 Aug 2009",
+            "August 1, 2009",
+            "Aug 1, 2009",
+            "  2009-08-01  ",
+            "2009-08-01T10:30:00",
+            "2009-08-01 10:30",
+        ] {
+            assert_eq!(
+                parse_date_text(text, "en-US").unwrap(),
+                expected,
+                "input: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_date_text_reads_numeric_dates_by_culture() {
+        let expected = ymd_to_ms(2009, 12, 31);
+        assert_eq!(parse_date_text("12/31/2009", "en-US").unwrap(), expected);
+        for culture in ["en-GB", "pt-PT", "de-DE"] {
+            for text in ["31/12/2009", "31.12.2009", "31-12-2009", "2009-12-31"] {
+                assert_eq!(
+                    parse_date_text(text, culture).unwrap(),
+                    expected,
+                    "input: {text}, culture: {culture}"
+                );
+            }
+        }
+        assert_eq!(
+            parse_date_text("1/8/2009", "en-GB").unwrap(),
+            ymd_to_ms(2009, 8, 1)
+        );
+        assert!(parse_date_text("31/12/2009", "en-US").is_err());
+        assert!(parse_date_text("12/31/2009", "en-GB").is_err());
+    }
+
+    #[test]
+    fn parse_date_text_rejects_invalid_dates() {
+        for text in ["2023-02-30", "2023-13-01", "2020-01-01-x", "not a date", ""] {
+            assert!(
+                matches!(
+                    parse_date_text(text, "en-US"),
+                    Err(DaxError::InvalidArgument(_))
+                ),
+                "input: {text}"
+            );
+        }
+    }
+}

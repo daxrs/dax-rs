@@ -72,7 +72,7 @@ Each function is marked **Compliant** (matches DAX behaviour for all documented 
 | `MINUTE(date)`                                  | Compliant |       |
 | `SECOND(date)`                                  | Compliant |       |
 | `CALENDAR(start, end)`                          | Pending   |       |
-| `DATEVALUE(text)`                               | Pending   |       |
+| `DATEVALUE(text)`                               | Compliant |       |
 | `NETWORKDAYS(start, end [, holidays, weekend])` | Pending   |       |
 | `QUARTER(date)`                                 | Compliant |       |
 | `TIME(hour, minute, second)`                    | Pending   |       |
