@@ -456,47 +456,104 @@ pub fn datevalue_fn(
     _fc: &FilterContext,
     _rc: &RowContext,
 ) -> DaxResult<Value> {
-    match &args[0] {
-        Value::String(s) => {
-            let culture = ctx.catalog.culture.as_deref().unwrap_or("en-US");
-            Ok(Value::DateTime(parse_date_text(s, culture)?))
+    let culture = ctx.catalog.culture.as_deref().unwrap_or("en-US");
+    let text = match &args[0] {
+        Value::Blank => return Ok(Value::Blank),
+        Value::DateTime(ms) => return Ok(Value::DateTime(ms - ms.rem_euclid(86_400_000))),
+        Value::String(s) => s.clone(),
+        Value::Integer(n) => n.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::Boolean(b) => b.to_string().to_uppercase(),
+        other => {
+            return Err(DaxError::Type(format!(
+                "DATEVALUE: expected text, got {other:?}"
+            )))
         }
-        Value::Blank => Ok(Value::Blank),
-        other => Err(DaxError::Type(format!(
-            "DATEVALUE: expected text, got {other:?}"
-        ))),
-    }
+    };
+    Ok(Value::DateTime(parse_date_text(&text, culture)?))
 }
 
 fn parse_date_text(text: &str, culture: &str) -> DaxResult<i64> {
-    const ISO: [&str; 2] = ["%Y-%m-%d", "%Y/%m/%d"];
-    const NAMED: [&str; 4] = ["%d %B %Y", "%d %b %Y", "%B %d, %Y", "%b %d, %Y"];
-    const MONTH_FIRST: [&str; 1] = ["%m/%d/%Y"];
-    const DAY_FIRST: [&str; 3] = ["%d/%m/%Y", "%d.%m.%Y", "%d-%m-%Y"];
-    let numeric: &[&str] = if culture.eq_ignore_ascii_case("en-US") {
-        &MONTH_FIRST
-    } else {
-        &DAY_FIRST
+    let invalid = || {
+        DaxError::InvalidArgument(format!(
+            "DATEVALUE: cannot parse '{}' as a date",
+            text.trim()
+        ))
     };
-    let text = text.trim();
-    let date_only = text.split(['T', ' ']).next().unwrap_or(text);
-    [text, date_only]
+    let mut words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() > 2
+        && words
+            .last()
+            .is_some_and(|w| w.eq_ignore_ascii_case("AM") || w.eq_ignore_ascii_case("PM"))
+    {
+        words.pop();
+    }
+    if words.len() > 1 && words.last().is_some_and(|w| w.contains(':')) {
+        words.pop();
+    }
+    let date = words.join(" ");
+    parse_numeric_date(&date, culture)
+        .or_else(|| parse_named_date(&date))
+        .map(|d| ymd_to_ms(d.0, d.1, d.2))
+        .ok_or_else(invalid)
+}
+
+/// `Y-M-D` when the first part has four digits, otherwise the culture's order.
+/// `en-US` is month first and falls back to day first when that is invalid.
+fn parse_numeric_date(text: &str, culture: &str) -> Option<(i32, i32, i32)> {
+    let sep = text.chars().find(|c| !c.is_ascii_digit())?;
+    if !matches!(sep, '/' | '-' | '.') {
+        return None;
+    }
+    let parts: Vec<&str> = text.split(sep).collect();
+    if parts.len() != 3
+        || parts
+            .iter()
+            .any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return None;
+    }
+    let num = |p: &str| p.parse::<i32>().ok();
+    let year = |p: &str| {
+        // .NET two-digit year window: 00-49 is 20xx, 50-99 is 19xx.
+        let y = num(p)?;
+        Some(match p.len() {
+            1 | 2 if y < 50 => 2000 + y,
+            1 | 2 => 1900 + y,
+            _ => y,
+        })
+    };
+    let valid = |y: i32, m: i32, d: i32| {
+        chrono::NaiveDate::from_ymd_opt(y, m as u32, d as u32).map(|_| (y, m, d))
+    };
+    if parts[0].len() == 4 {
+        return valid(num(parts[0])?, num(parts[1])?, num(parts[2])?);
+    }
+    let (a, b, y) = (num(parts[0])?, num(parts[1])?, year(parts[2])?);
+    if culture.eq_ignore_ascii_case("en-US") {
+        valid(y, a, b).or_else(|| valid(y, b, a))
+    } else {
+        valid(y, b, a)
+    }
+}
+
+/// English month names, e.g. `1 Aug 2009` or `August 1, 2009`. A missing year
+/// means the current year.
+fn parse_named_date(text: &str) -> Option<(i32, i32, i32)> {
+    use chrono::Datelike;
+    const FORMATS: [&str; 4] = ["%d %B %Y", "%d %b %Y", "%B %d %Y", "%b %d %Y"];
+    let text = text.replace(',', " ");
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let year = chrono::Local::now().year();
+    [text.clone(), format!("{text} {year}")]
         .iter()
-        .flat_map(|candidate| {
-            ISO.iter()
-                .chain(numeric)
-                .chain(&NAMED)
-                .map(move |fmt| chrono::NaiveDate::parse_from_str(candidate, fmt))
+        .flat_map(|t| {
+            FORMATS
+                .iter()
+                .map(move |f| chrono::NaiveDate::parse_from_str(t, f))
         })
         .find_map(Result::ok)
-        .map(|d| {
-            d.and_time(chrono::NaiveTime::MIN)
-                .and_utc()
-                .timestamp_millis()
-        })
-        .ok_or_else(|| {
-            DaxError::InvalidArgument(format!("DATEVALUE: cannot parse '{text}' as a date"))
-        })
+        .map(|d| (d.year(), d.month() as i32, d.day() as i32))
 }
 
 #[cfg(test)]
@@ -516,7 +573,6 @@ mod tests {
             "August 1, 2009",
             "Aug 1, 2009",
             "  2009-08-01  ",
-            "2009-08-01T10:30:00",
             "2009-08-01 10:30",
         ] {
             assert_eq!(
@@ -544,7 +600,6 @@ mod tests {
             parse_date_text("1/8/2009", "en-GB").unwrap(),
             ymd_to_ms(2009, 8, 1)
         );
-        assert!(parse_date_text("31/12/2009", "en-US").is_err());
         assert!(parse_date_text("12/31/2009", "en-GB").is_err());
     }
 
@@ -559,5 +614,69 @@ mod tests {
                 "input: {text}"
             );
         }
+    }
+
+    #[test]
+    fn parse_date_text_rejects_iso_t_separator() {
+        for text in ["2009-08-01T10:30:00", "2009-08-01T10:30"] {
+            assert!(parse_date_text(text, "en-US").is_err(), "input: {text}");
+        }
+    }
+
+    #[test]
+    fn parse_date_text_strips_time_after_space() {
+        for text in ["2009-08-01 10:30", "8/1/2009 10:30", "8/1/2009 10:30:00 AM"] {
+            assert_eq!(
+                parse_date_text(text, "en-US").ok(),
+                Some(ymd_to_ms(2009, 8, 1)),
+                "input: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_date_text_named_month_with_time() {
+        assert_eq!(
+            parse_date_text("August 1, 2009 10:30", "en-US").ok(),
+            Some(ymd_to_ms(2009, 8, 1))
+        );
+    }
+
+    #[test]
+    fn parse_date_text_en_us_falls_back_to_day_first() {
+        assert_eq!(
+            parse_date_text("31/12/2009", "en-US").ok(),
+            Some(ymd_to_ms(2009, 12, 31))
+        );
+        assert_eq!(
+            parse_date_text("8/1/2009", "en-US").ok(),
+            Some(ymd_to_ms(2009, 8, 1))
+        );
+    }
+
+    #[test]
+    fn parse_date_text_two_digit_year() {
+        assert_eq!(
+            parse_date_text("8/1/09", "en-US").ok(),
+            Some(ymd_to_ms(2009, 8, 1))
+        );
+    }
+
+    #[test]
+    fn parse_date_text_short_dash_date_uses_culture_order() {
+        assert_eq!(
+            parse_date_text("10-11-12", "en-US").ok(),
+            Some(ymd_to_ms(2012, 10, 11))
+        );
+    }
+
+    #[test]
+    fn parse_date_text_missing_year_uses_current_year() {
+        use chrono::Datelike;
+        let year = chrono::Local::now().year();
+        assert_eq!(
+            parse_date_text("Aug 1", "en-US").ok(),
+            Some(ymd_to_ms(year, 8, 1))
+        );
     }
 }

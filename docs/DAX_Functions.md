@@ -10,7 +10,7 @@ lastUpdated: "July 2026"
 
 | Compliant | Partial | Pending | Total |
 |-----------|---------|---------|-------|
-|       123 |       6 |     112 |   241 |
+|       123 |       7 |     111 |   241 |
 
 Each function is marked **Compliant** (matches DAX behaviour for all documented inputs), **Partial** (works for common cases but has known gaps), or **Pending** (not yet implemented).
 
@@ -72,7 +72,7 @@ Each function is marked **Compliant** (matches DAX behaviour for all documented 
 | `MINUTE(date)`                                  | Compliant |       |
 | `SECOND(date)`                                  | Compliant |       |
 | `CALENDAR(start, end)`                          | Pending   |       |
-| `DATEVALUE(text)`                               | Compliant |       |
+| `DATEVALUE(text)`                               | Partial   | English month names only. Only `en-US` is month first; other cultures are read day first and are not yet verified against Power BI |
 | `NETWORKDAYS(start, end [, holidays, weekend])` | Pending   |       |
 | `QUARTER(date)`                                 | Compliant |       |
 | `TIME(hour, minute, second)`                    | Pending   |       |
